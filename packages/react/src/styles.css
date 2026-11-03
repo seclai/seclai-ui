@@ -1,0 +1,105 @@
+/*
+ * Minimal, optional styles. Override any --seclai-* variable on .seclai-agent or
+ * an ancestor to theme the components.
+ */
+.seclai-agent {
+  --seclai-font: inherit;
+  --seclai-text: inherit;
+  --seclai-muted: color-mix(in srgb, currentColor 60%, transparent);
+  --seclai-border: color-mix(in srgb, currentColor 20%, transparent);
+  --seclai-surface: color-mix(in srgb, currentColor 5%, transparent);
+  --seclai-error: #c62828;
+  --seclai-radius: 8px;
+  --seclai-gap: 12px;
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--seclai-gap);
+  font-family: var(--seclai-font);
+  color: var(--seclai-text);
+}
+
+.seclai-form,
+.seclai-field {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--seclai-gap) / 2);
+}
+
+.seclai-form {
+  gap: var(--seclai-gap);
+}
+
+.seclai-agent textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--seclai-border);
+  border-radius: var(--seclai-radius);
+}
+
+.seclai-actions {
+  display: flex;
+  gap: calc(var(--seclai-gap) / 2);
+}
+
+.seclai-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.875em;
+  color: var(--seclai-muted);
+}
+
+.seclai-output,
+.seclai-turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--seclai-gap);
+  padding: var(--seclai-gap);
+  background: var(--seclai-surface);
+  border-radius: var(--seclai-radius);
+}
+
+.seclai-turns {
+  display: flex;
+  flex-direction: column;
+  gap: var(--seclai-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.seclai-turn-user {
+  align-self: flex-end;
+  max-width: 80%;
+}
+
+.seclai-markdown {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.seclai-media {
+  margin: 0;
+}
+
+.seclai-media img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--seclai-radius);
+}
+
+.seclai-notice {
+  margin: 0;
+  color: var(--seclai-muted);
+}
+
+.seclai-error {
+  margin: 0;
+  color: var(--seclai-error);
+}

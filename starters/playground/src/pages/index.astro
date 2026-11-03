@@ -1,0 +1,43 @@
+---
+import { Playground } from "../components/Playground";
+import { apiKey, cases } from "../lib/cases";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Seclai playground</title>
+    <link rel="icon" href="data:," />
+    <style is:global>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 24px 16px;
+        font-family: system-ui, sans-serif;
+        line-height: 1.5;
+      }
+      .tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .tabs button[aria-pressed="true"] {
+        font-weight: 600;
+      }
+      .hint {
+        opacity: 0.7;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Seclai playground</h1>
+    {!apiKey && <p><strong>Set SECLAI_API_KEY in .env, then restart.</strong></p>}
+    <!-- client:load, not client:only, so this also proves the components render on the server. -->
+    <Playground client:load cases={cases} />
+  </body>
+</html>
