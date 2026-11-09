@@ -12,13 +12,14 @@ pnpm install
 pnpm build
 
 cd starters/playground
-cp .env.example .env   # add your API key and agent ids
 pnpm dev
 ```
 
 Then open http://localhost:4321. Run `pnpm build` at the root again after changing a package, since the playground uses each package's `dist`.
 
-## What each case needs
+With no API key, every tab runs on sample replies from `src/lib/demo.ts` and nothing contacts Seclai. To use real agents, run `cp .env.example .env`, add your API key and agent ids, and restart.
+
+## What each case needs with real agents
 
 | Case | `.env` variable | Agent |
 |---|---|---|

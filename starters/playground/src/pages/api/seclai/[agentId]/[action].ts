@@ -1,6 +1,7 @@
 import { createSeclaiHandlers, type SeclaiHandlers } from "@seclai/handlers";
 import type { APIRoute } from "astro";
-import { apiKey, cases } from "../../../../lib/cases";
+import { apiKey, cases, demoMode } from "../../../../lib/cases";
+import { demoResponse } from "../../../../lib/demo";
 
 export const prerender = false;
 
@@ -28,9 +29,7 @@ export const ALL: APIRoute = ({ params, request }) => {
   if (!agentId || !cases.some((c) => c.agentId === agentId)) {
     return notFound("That agent isn't configured for this playground.");
   }
-  if (!apiKey) {
-    return Response.json({ error: "Set SECLAI_API_KEY in .env.", status: 500 }, { status: 500 });
-  }
+  if (demoMode || !apiKey) return demoResponse(agentId, handlerName, request);
 
   let handlers = handlersByAgent.get(agentId);
   if (!handlers) {

@@ -14,33 +14,41 @@ function env(name: string): string | undefined {
 
 export const apiKey = env("SECLAI_API_KEY");
 
+/** With no API key, every case runs on the sample responses in `demo.ts`. */
+export const demoMode = !apiKey;
+
+function agentId(key: string): string | null {
+  if (demoMode) return `demo-${key}`;
+  return env(`SECLAI_AGENT_ID_${key.toUpperCase()}`) ?? null;
+}
+
 export const cases: PlaygroundCase[] = [
   {
     key: "text",
     label: "Text in, text out",
     hint: "Send text and expect text back.",
     mode: "form",
-    agentId: env("SECLAI_AGENT_ID_TEXT") ?? null,
+    agentId: agentId("text"),
   },
   {
     key: "file",
     label: "File in",
     hint: "Attach a file. The file inputs come from the agent's accepted attachments.",
     mode: "form",
-    agentId: env("SECLAI_AGENT_ID_FILE") ?? null,
+    agentId: agentId("file"),
   },
   {
     key: "image",
     label: "Image out",
     hint: "The image should show below the output, loaded through the download proxy.",
     mode: "form",
-    agentId: env("SECLAI_AGENT_ID_IMAGE") ?? null,
+    agentId: agentId("image"),
   },
   {
     key: "chat",
     label: "Multi-turn chat",
     hint: "Ask a follow-up that relies on an earlier message.",
     mode: "chat",
-    agentId: env("SECLAI_AGENT_ID_CHAT") ?? null,
+    agentId: agentId("chat"),
   },
 ];

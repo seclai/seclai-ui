@@ -1,22 +1,45 @@
 /*
- * Minimal, optional styles. Override any --seclai-* variable on .seclai-agent or
- * an ancestor to theme the components.
+ * Optional styles. Set any --seclai-* variable on :root or an ancestor to theme
+ * the components. The defaults have no specificity, so yours always win.
  */
-.seclai-agent {
+:where(:root, :host) {
   --seclai-font: inherit;
   --seclai-text: inherit;
-  --seclai-muted: color-mix(in srgb, currentColor 60%, transparent);
-  --seclai-border: color-mix(in srgb, currentColor 20%, transparent);
+  --seclai-muted: color-mix(in srgb, currentColor 70%, transparent);
+  --seclai-border: color-mix(in srgb, currentColor 15%, transparent);
+  --seclai-field-border: color-mix(in srgb, currentColor 50%, transparent);
   --seclai-surface: color-mix(in srgb, currentColor 5%, transparent);
-  --seclai-error: #c62828;
+  --seclai-surface-hover: color-mix(in srgb, currentColor 10%, transparent);
+  --seclai-accent: light-dark(#581c87, #d8b4fe);
+  --seclai-accent-hover: light-dark(#4c1d95, #e9d8ff);
+  --seclai-on-accent: light-dark(#ffffff, #1e1b4b);
+  --seclai-focus: var(--seclai-accent);
+  --seclai-error: light-dark(#b42318, #fda29b);
+  --seclai-error-surface: color-mix(in srgb, var(--seclai-error) 10%, transparent);
   --seclai-radius: 8px;
-  --seclai-gap: 12px;
+  --seclai-gap: 16px;
+  --seclai-control-height: 40px;
+}
 
+.seclai-agent,
+.seclai-agent *,
+.seclai-agent *::before,
+.seclai-agent *::after {
+  box-sizing: border-box;
+}
+
+.seclai-agent {
   display: flex;
   flex-direction: column;
   gap: var(--seclai-gap);
   font-family: var(--seclai-font);
   color: var(--seclai-text);
+  line-height: 1.5;
+}
+
+.seclai-agent :focus-visible {
+  outline: 2px solid var(--seclai-focus);
+  outline-offset: 2px;
 }
 
 .seclai-form,
@@ -30,40 +53,168 @@
   gap: var(--seclai-gap);
 }
 
-.seclai-agent textarea {
+.seclai-field > span {
+  font-size: 0.875em;
+  font-weight: 500;
+}
+
+/* Fields */
+.seclai-agent textarea,
+.seclai-agent input[type="file"] {
   width: 100%;
-  box-sizing: border-box;
-  padding: 8px;
+  min-height: var(--seclai-control-height);
   font: inherit;
   color: inherit;
   background: transparent;
-  border: 1px solid var(--seclai-border);
+  border: 1px solid var(--seclai-field-border);
   border-radius: var(--seclai-radius);
 }
 
+.seclai-agent textarea {
+  display: block;
+  padding: 8px 12px;
+  resize: vertical;
+}
+
+.seclai-agent textarea::placeholder {
+  color: var(--seclai-muted);
+  opacity: 1;
+}
+
+.seclai-agent input[type="file"] {
+  padding: 4px;
+  font-size: 0.875em;
+  cursor: pointer;
+}
+
+.seclai-agent input[type="file"]::file-selector-button {
+  min-height: 30px;
+  margin-inline-end: 12px;
+  padding: 0 12px;
+  font: inherit;
+  font-weight: 500;
+  color: var(--seclai-text);
+  cursor: pointer;
+  background: var(--seclai-surface);
+  border: 1px solid var(--seclai-border);
+  border-radius: calc(var(--seclai-radius) - 3px);
+  transition: background-color 120ms ease-out;
+}
+
+/* Inset, so the ring never collides with a neighbouring field. */
+.seclai-agent textarea:focus-visible,
+.seclai-agent input[type="file"]:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Buttons */
 .seclai-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: calc(var(--seclai-gap) / 2);
 }
 
-.seclai-steps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.seclai-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--seclai-control-height);
+  padding: 0 16px;
+  font: inherit;
   font-size: 0.875em;
+  font-weight: 500;
+  color: var(--seclai-text);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--seclai-field-border);
+  border-radius: var(--seclai-radius);
+  transition:
+    background-color 120ms ease-out,
+    border-color 120ms ease-out,
+    transform 120ms ease-out;
+}
+
+/* Brings the 40px control up to a 44px hit target without changing its look. */
+.seclai-button::before {
+  content: "";
+  position: absolute;
+  inset: -3px -1px;
+}
+
+.seclai-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.seclai-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.seclai-button-primary {
+  color: var(--seclai-on-accent);
+  background: var(--seclai-accent);
+  border-color: var(--seclai-accent);
+}
+
+@media (hover: hover) {
+  .seclai-button:hover:not(:disabled) {
+    background: var(--seclai-surface-hover);
+  }
+
+  .seclai-button-primary:hover:not(:disabled) {
+    background: var(--seclai-accent-hover);
+    border-color: var(--seclai-accent-hover);
+  }
+
+  .seclai-agent input[type="file"]:hover::file-selector-button {
+    background: var(--seclai-surface-hover);
+  }
+}
+
+@media (pointer: coarse) {
+  .seclai-agent {
+    --seclai-control-height: 44px;
+  }
+
+  /* Below 16px, iOS zooms the page when a field takes focus. */
+  .seclai-agent textarea {
+    font-size: 16px;
+  }
+}
+
+/* The run's progress */
+.seclai-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0 0 0 12px;
+  font-size: 0.875em;
+  list-style: none;
+  border-inline-start: 2px solid var(--seclai-border);
+}
+
+/* Earlier steps recede, so the latest one reads as the run's current state. */
+.seclai-steps li:not(:last-child) {
   color: var(--seclai-muted);
 }
 
+/* Output */
 .seclai-output,
 .seclai-turn {
   display: flex;
   flex-direction: column;
-  gap: var(--seclai-gap);
+  gap: calc(var(--seclai-gap) * 0.75);
+}
+
+.seclai-output {
   padding: var(--seclai-gap);
   background: var(--seclai-surface);
   border-radius: var(--seclai-radius);
 }
 
+/* Chat */
 .seclai-turns {
   display: flex;
   flex-direction: column;
@@ -73,9 +224,16 @@
   list-style: none;
 }
 
+.seclai-turns:empty {
+  display: none;
+}
+
 .seclai-turn-user {
   align-self: flex-end;
   max-width: 80%;
+  padding: 8px 12px;
+  background: var(--seclai-surface-hover);
+  border-radius: var(--seclai-radius);
 }
 
 .seclai-markdown {
@@ -84,22 +242,80 @@
 }
 
 .seclai-media {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   margin: 0;
+  font-size: 0.875em;
 }
 
 .seclai-media img {
   display: block;
+  /* A flex item stretches by default, which would blow up a small image. */
+  align-self: flex-start;
   max-width: 100%;
   height: auto;
   border-radius: var(--seclai-radius);
 }
 
+.seclai-media a {
+  color: var(--seclai-accent);
+  text-underline-offset: 0.16em;
+}
+
+/* Messages */
 .seclai-notice {
   margin: 0;
+  font-size: 0.875em;
   color: var(--seclai-muted);
 }
 
 .seclai-error {
   margin: 0;
+  padding: 8px 12px;
+  font-size: 0.875em;
   color: var(--seclai-error);
+  background: var(--seclai-error-surface);
+  border-radius: var(--seclai-radius);
+}
+
+/* Holds the form's shape while the agent's attachments load. */
+.seclai-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--seclai-gap);
+}
+
+.seclai-skeleton > span {
+  display: block;
+  height: 114px;
+  background: var(--seclai-surface-hover);
+  border-radius: var(--seclai-radius);
+  animation: seclai-pulse 1.6s ease-in-out infinite;
+}
+
+.seclai-skeleton > span:last-child {
+  width: 72px;
+  height: var(--seclai-control-height);
+}
+
+@keyframes seclai-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seclai-button,
+  .seclai-agent input[type="file"]::file-selector-button {
+    transition: none;
+  }
+
+  .seclai-button:active:not(:disabled) {
+    transform: none;
+  }
+
+  .seclai-skeleton > span {
+    animation: none;
+  }
 }
