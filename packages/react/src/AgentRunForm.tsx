@@ -92,12 +92,24 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
 
   if (loadError) {
     return (
-      <p className="seclai-error" role="alert">
-        {loadError}
-      </p>
+      <div className="seclai-agent">
+        <p className="seclai-error" role="alert">
+          {loadError}
+        </p>
+      </div>
     );
   }
-  if (!slots) return <p className="seclai-notice">Loading…</p>;
+  if (!slots) {
+    return (
+      <div className="seclai-agent">
+        <p className="seclai-notice">Loading…</p>
+        <div className="seclai-skeleton" aria-hidden="true">
+          <span />
+          <span />
+        </div>
+      </div>
+    );
+  }
 
   const error = formError ?? run.error;
 
@@ -128,11 +140,11 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
         ))}
 
         <div className="seclai-actions">
-          <button type="submit" disabled={busy}>
+          <button type="submit" className="seclai-button seclai-button-primary" disabled={busy}>
             {uploading ? "Uploading…" : "Run"}
           </button>
           {run.status === "running" && (
-            <button type="button" onClick={run.cancel}>
+            <button type="button" className="seclai-button" onClick={run.cancel}>
               Stop
             </button>
           )}
@@ -158,7 +170,7 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
       {run.status === "cancelled" && <p className="seclai-notice">Stopped.</p>}
 
       {(run.text || run.attachments.length > 0) && (
-        <div className="seclai-output" aria-live="polite">
+        <div className="seclai-output" aria-live="polite" aria-busy={run.status === "running"}>
           {run.text && <MarkdownContent content={run.text} />}
           {run.attachments.map((attachment) => (
             <MediaPreview key={attachment.id} attachment={attachment} />

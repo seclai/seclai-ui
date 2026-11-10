@@ -1,6 +1,6 @@
 # @seclai/react
 
-React components and hooks for running [Seclai](https://seclai.com) agents. They talk to [`@seclai/handlers`](../handlers) on your server, never to the Seclai API directly. Works in React 18+, Next.js and Astro islands.
+React components and hooks for running [Seclai](https://seclai.com) agents. They talk to [`@seclai/handlers`](https://www.npmjs.com/package/@seclai/handlers) on your server, never to the Seclai API directly. Works in React 18+, Next.js and Astro islands.
 
 ## Install
 
@@ -8,7 +8,7 @@ React components and hooks for running [Seclai](https://seclai.com) agents. They
 npm install @seclai/react
 ```
 
-`react` and `react-dom` 18 or later are peer dependencies. Mount the handlers on your server first: see the [`@seclai/handlers` README](../handlers/README.md#usage).
+`react` and `react-dom` 18 or later are peer dependencies. Mount the handlers on your server first: see the [`@seclai/handlers` README](https://www.npmjs.com/package/@seclai/handlers#usage).
 
 ## Usage
 
@@ -51,15 +51,20 @@ await start({ input: "Hello", uploadIds: ["..."], sessionId: "..." });
 
 ## Styling
 
-The components are unstyled apart from the optional stylesheet. It's built on CSS variables you can override, along with `seclai-*` class names:
+The components are unstyled apart from the optional stylesheet, which uses Seclai's colours by default. It's built on CSS variables you can set on `:root` or any ancestor, along with `seclai-*` class names:
 
 ```css
-.seclai-agent {
+:root {
+  --seclai-accent: #0f766e;
+  --seclai-accent-hover: #115e59;
+  --seclai-on-accent: #ffffff;
   --seclai-radius: 4px;
-  --seclai-gap: 16px;
-  --seclai-error: crimson;
 }
 ```
+
+Fonts and text colour come from your page. The default colours follow your page's `color-scheme`, using CSS `light-dark()`, so they need a browser from 2024 or later. Setting a variable to a plain colour works in any browser that supports `color-mix()`.
+
+**On a dark page, declare `color-scheme: dark`** (or `light dark`). Without it the defaults stay in their light versions, and the purple links and focus rings are too dark to read.
 
 ## Placeholders
 
@@ -69,7 +74,6 @@ These are exported so the API is in place, but they're minimal until they're por
 |---|---|---|
 | `MarkdownContent` | Plain text | GFM tables, KaTeX, mermaid, sanitized SVG |
 | `MediaPreview` | Images inline, a download link for everything else | Image, audio, video, PDF, download fallback |
-| `KnowledgeBaseChat` | A notice | Knowledge base chat |
 
 ## License
 

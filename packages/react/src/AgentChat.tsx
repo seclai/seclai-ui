@@ -94,7 +94,7 @@ export function AgentChat({ basePath, agentId, placeholder = "Send a message" }:
 
   return (
     <div className="seclai-agent seclai-chat">
-      <ul className="seclai-turns" aria-live="polite">
+      <ul className="seclai-turns" aria-live="polite" aria-busy={running}>
         {turns.map((turn) => (
           <Turn key={turn.id} turn={turn} />
         ))}
@@ -119,11 +119,15 @@ export function AgentChat({ basePath, agentId, placeholder = "Send a message" }:
           onKeyDown={onKeyDown}
         />
         <div className="seclai-actions">
-          <button type="submit" disabled={running || !message.trim()}>
+          <button
+            type="submit"
+            className="seclai-button seclai-button-primary"
+            disabled={running || !message.trim()}
+          >
             Send
           </button>
           {running && (
-            <button type="button" onClick={run.cancel}>
+            <button type="button" className="seclai-button" onClick={run.cancel}>
               Stop
             </button>
           )}

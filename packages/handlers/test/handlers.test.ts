@@ -455,3 +455,34 @@ describe("download", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("handle", () => {
+  it("routes by the last path segment", async () => {
+    const refs = { requires_uploads: false, accepted_attachments: [] };
+    client.getAgentAttachmentReferences.mockResolvedValue(refs);
+
+    const res = await handlers().handle(new Request(`${URL_BASE}/attachment-references`));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(refs);
+  });
+
+  it("ignores a trailing slash and the query string", async () => {
+    const res = await handlers().handle(new Request(`${URL_BASE}/download/?runId=nope`));
+    // Reached the download handler, which rejects the bad run id.
+    expect(res.status).toBe(400);
+  });
+
+  it("keeps each handler's method check", async () => {
+    const res = await handlers().handle(new Request(`${URL_BASE}/run`));
+    expect(res.status).toBe(405);
+  });
+
+  it.each(["unknown", "handle", "toString", "constructor", ""])(
+    "returns 404 for %j",
+    async (segment) => {
+      const res = await handlers().handle(new Request(`${URL_BASE}/${segment}`));
+      expect(res.status).toBe(404);
+    },
+  );
+});

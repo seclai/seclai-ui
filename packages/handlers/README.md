@@ -10,9 +10,10 @@ npm install @seclai/handlers
 
 ## Usage
 
-`createSeclaiHandlers` returns one function per endpoint, each taking a `Request` and returning a `Promise<Response>`. Routing is up to your framework.
+`createSeclaiHandlers` returns a function per endpoint, each taking a `Request` and returning a `Promise<Response>`, plus `handle`, which serves all of them from one catch-all route.
 
 ```ts
+// Next.js: app/api/seclai/[action]/route.ts
 import { createSeclaiHandlers } from "@seclai/handlers";
 
 const seclai = createSeclaiHandlers({
@@ -20,9 +21,17 @@ const seclai = createSeclaiHandlers({
   agentId: process.env.SECLAI_AGENT_ID!,
 });
 
-// Next.js route handler: app/api/seclai/run/route.ts
-export const POST = seclai.run;
+export const GET = seclai.handle;
+export const POST = seclai.handle;
 ```
+
+```ts
+// Astro: src/pages/api/seclai/[action].ts
+export const prerender = false;
+export const ALL: APIRoute = ({ request }) => seclai.handle(request);
+```
+
+`handle` picks the handler from the last segment of the URL path and returns a 404 for anything else. To mount routes one by one instead, use `seclai.run`, `seclai.upload` and the rest directly.
 
 `@seclai/react` expects these routes under its base path, which defaults to `/api/seclai`:
 

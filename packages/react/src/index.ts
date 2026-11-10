@@ -20,6 +20,5 @@ export type {
 } from "./types";
 
 // Placeholders, to be ported from the main Seclai app. See each file.
-export { KnowledgeBaseChat } from "./placeholders/KnowledgeBaseChat";
 export { MarkdownContent, type MarkdownContentProps } from "./placeholders/MarkdownContent";
 export { MediaPreview, type MediaPreviewProps } from "./placeholders/MediaPreview";

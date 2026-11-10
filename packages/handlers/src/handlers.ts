@@ -58,7 +58,21 @@ export interface SeclaiHandlers {
   run: SeclaiHandler;
   /** `GET ?runId=&attachmentId=&name=`: streams a file from a run. */
   download: SeclaiHandler;
+  /**
+   * All four in one, for a single catch-all route: picks the handler from the
+   * last segment of the URL path (`attachment-references`, `upload`, `run` or
+   * `download`) and returns a 404 for anything else.
+   */
+  handle: SeclaiHandler;
 }
+
+/** The last path segment each handler answers to in {@link SeclaiHandlers.handle}. */
+const ROUTES = {
+  "attachment-references": "attachmentReferences",
+  upload: "upload",
+  run: "run",
+  download: "download",
+} as const satisfies Record<string, Exclude<keyof SeclaiHandlers, "handle">>;
 
 function wrongMethod(allow: string): Response {
   return jsonError(405, "Method not allowed.", { allow });
@@ -120,7 +134,7 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
     fetch: (input, init) => globalThis.fetch(input, init),
   });
 
-  return {
+  const handlers: Omit<SeclaiHandlers, "handle"> = {
     async attachmentReferences(req) {
       if (req.method !== "GET") return wrongMethod("GET");
       try {
@@ -250,6 +264,16 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
       } catch (err) {
         return toErrorResponse(err);
       }
+    },
+  };
+
+  return {
+    ...handlers,
+    async handle(req) {
+      const segment = new URL(req.url).pathname.replace(/\/+$/, "").split("/").pop() ?? "";
+      const name = Object.hasOwn(ROUTES, segment) ? ROUTES[segment as keyof typeof ROUTES] : undefined;
+      if (!name) return jsonError(404, "Not found.");
+      return handlers[name](req);
     },
   };
 }
