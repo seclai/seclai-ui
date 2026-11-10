@@ -1,16 +1,17 @@
 import type { AgentAttachment } from "../types";
 
-/**
- * PLACEHOLDER: port from seclai/frontend/app/components/MediaPreview.tsx, which
- * handles image, audio, video, PDF and a download fallback. Don't rebuild it here.
- *
- * Until then images show inline, so image output can be checked by eye, and
- * everything else is a download link.
- */
+// Placeholder, to be ported from the MediaPreview component in the main Seclai
+// app, which handles image, audio, video, PDF and a download fallback. Port it
+// rather than rebuilding it here.
+
 export interface MediaPreviewProps {
   attachment: AgentAttachment;
 }
 
+/**
+ * Shows a file from a run. For now images show inline and everything else is a
+ * download link. Audio, video and PDF previews are coming in a later version.
+ */
 export function MediaPreview({ attachment }: MediaPreviewProps) {
   const name = attachment.name ?? attachment.id;
   return (
