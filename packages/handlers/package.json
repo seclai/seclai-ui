@@ -1,6 +1,6 @@
 {
   "name": "@seclai/handlers",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Framework-free server handlers for running Seclai agents from a web app: upload, run with SSE relay, and download proxy.",
   "license": "MIT",
   "type": "module",

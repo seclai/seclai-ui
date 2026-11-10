@@ -1,6 +1,6 @@
 {
   "name": "@seclai/react",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "React components and hooks for running Seclai agents: run form, chat, and streaming output.",
   "license": "MIT",
   "type": "module",
