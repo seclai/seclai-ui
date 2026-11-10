@@ -5,7 +5,7 @@ import { demoResponse } from "../../../../lib/demo";
 
 export const prerender = false;
 
-const ACTIONS: Record<string, keyof SeclaiHandlers> = {
+const ACTIONS: Record<string, Exclude<keyof SeclaiHandlers, "handle">> = {
   "attachment-references": "attachmentReferences",
   upload: "upload",
   run: "run",
@@ -36,5 +36,5 @@ export const ALL: APIRoute = ({ params, request }) => {
     handlers = createSeclaiHandlers({ apiKey, agentId });
     handlersByAgent.set(agentId, handlers);
   }
-  return handlers[handlerName](request);
+  return handlers.handle(request);
 };

@@ -70,7 +70,7 @@ function runStream(agentId: string, input: string | undefined, fileCount: number
 
 export async function demoResponse(
   agentId: string,
-  action: keyof SeclaiHandlers,
+  action: Exclude<keyof SeclaiHandlers, "handle">,
   request: Request,
 ): Promise<Response> {
   switch (action) {

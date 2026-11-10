@@ -74,7 +74,6 @@ These are exported so the API is in place, but they're minimal until they're por
 |---|---|---|
 | `MarkdownContent` | Plain text | GFM tables, KaTeX, mermaid, sanitized SVG |
 | `MediaPreview` | Images inline, a download link for everything else | Image, audio, video, PDF, download fallback |
-| `KnowledgeBaseChat` | A notice | Knowledge base chat |
 
 ## License
 

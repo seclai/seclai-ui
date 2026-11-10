@@ -170,7 +170,7 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
       {run.status === "cancelled" && <p className="seclai-notice">Stopped.</p>}
 
       {(run.text || run.attachments.length > 0) && (
-        <div className="seclai-output" aria-live="polite">
+        <div className="seclai-output" aria-live="polite" aria-busy={run.status === "running"}>
           {run.text && <MarkdownContent content={run.text} />}
           {run.attachments.map((attachment) => (
             <MediaPreview key={attachment.id} attachment={attachment} />

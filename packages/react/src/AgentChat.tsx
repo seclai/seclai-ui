@@ -94,7 +94,7 @@ export function AgentChat({ basePath, agentId, placeholder = "Send a message" }:
 
   return (
     <div className="seclai-agent seclai-chat">
-      <ul className="seclai-turns" aria-live="polite">
+      <ul className="seclai-turns" aria-live="polite" aria-busy={running}>
         {turns.map((turn) => (
           <Turn key={turn.id} turn={turn} />
         ))}
