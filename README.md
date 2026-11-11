@@ -20,13 +20,9 @@ pnpm test
 
 ## Releasing
 
-Packages are versioned independently with [Changesets](https://github.com/changesets/changesets).
+Every merge to `main` publishes both packages to npm under one shared version, the same way the other Seclai packages release. [`seclai/github-tag-action`](https://github.com/seclai/github-tag-action) picks the next version from the git tags, bumping the patch number by default. The `package.json` files stay at `0.0.0`, and CI writes the real version in at publish time.
 
-```sh
-pnpm changeset   # describe your change, pick the packages it affects
-```
-
-Merging to `main` opens a "Version Packages" PR; merging that PR publishes to npm.
+Merges that only touch `starters/` or this README don't publish. Pull requests are built, typechecked and tested before merging.
 
 ## License
 

@@ -1,0 +1,80 @@
+name: Release Build
+
+on:
+  push:
+    branches:
+      - main
+    # Changes that don't touch a published package don't need a new release.
+    paths-ignore:
+      - "starters/**"
+      - "README.md"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Never cancel a release halfway: a run stopped after npm publish but before
+  # the tag push would make the next run try to publish the same version.
+  cancel-in-progress: false
+
+jobs:
+  npm:
+    name: Build, Typecheck, and Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    outputs:
+      version: ${{ steps.next-tag.outputs.new_tag }}
+    steps:
+      - name: Checkout files
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: "0"
+
+      - name: Determine next version tag
+        id: next-tag
+        uses: seclai/github-tag-action@1.75.0
+        env:
+          DEFAULT_BUMP: patch
+          DRY_RUN: "true"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Build first: the playground's typecheck reads each package's dist.
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Publish packages to npm
+        env:
+          VERSION: ${{ steps.next-tag.outputs.new_tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish:ci
+
+      - name: Push tag
+        run: |
+          git tag ${{ steps.next-tag.outputs.new_tag }}
+          git push origin ${{ steps.next-tag.outputs.new_tag }}
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ steps.next-tag.outputs.new_tag }} \
+            --title "Release ${{ steps.next-tag.outputs.new_tag }}" \
+            --generate-notes

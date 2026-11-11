@@ -6,11 +6,9 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "changeset": "changeset",
-    "release": "pnpm build && changeset publish"
+    "publish:ci": "test -n \"$VERSION\" && pnpm -r --filter \"./packages/*\" exec npm pkg set version=$VERSION && pnpm -r --filter \"./packages/*\" exec npm publish --provenance --access public --ignore-scripts"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.29.7",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
