@@ -1,4 +1,5 @@
 export {
+  ATTACHMENT_SLOTS_TTL_MS,
   createSeclaiHandlers,
   DEFAULT_API_VERSION,
   deny,
@@ -13,7 +14,9 @@ export type {
   SeclaiHandler,
   SeclaiHandlers,
   SeclaiHandlersOptions,
+  SeclaiUploadOptions,
   UnboundSeclaiHandlers,
+  UploadResult,
   WithContext,
 } from "./handlers";
 export type {
