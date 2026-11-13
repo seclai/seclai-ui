@@ -1,5 +1,6 @@
 import { Seclai, SeclaiApiVersion, type ApiVersion } from "@seclai/sdk";
 import { json, jsonError, toErrorResponse } from "./errors";
+import { createRunObserver, type RunEndCallback, type RunEventCallback } from "./run-callbacks";
 import { relayRunEvents, SSE_HEADERS } from "./sse";
 
 /**
@@ -35,6 +36,35 @@ export interface SeclaiHandlersOptions<Ctx = undefined> {
   apiVersion?: ApiVersion;
   /** How long a streaming run may take, in milliseconds. Defaults to 11 minutes. */
   runTimeoutMs?: number;
+  /**
+   * Called with each event of a run stream, in order, and awaited before the
+   * event is relayed to the browser. If it throws, the stream ends with an
+   * `error` event.
+   */
+  onEvent?: RunEventCallback;
+  /**
+   * Called exactly once for each run that started streaming, with how it ended.
+   * Awaited before the final `done`, `error` or `timeout` event is relayed, so
+   * whatever it stores is in place when the browser sees the run end. If it
+   * throws, the browser gets an `error` event instead.
+   */
+  onRunEnd?: RunEndCallback;
+  /**
+   * What happens to a run when the browser disconnects: closes the tab, moves
+   * to another page, or aborts the request. The run itself always carries on at
+   * Seclai and uses credits.
+   *
+   * - `false` (default): the handler stops reading it. `onRunEnd` reports
+   *   `cancelled` with what had streamed so far.
+   * - `true`: the handler keeps reading it in the background until it ends,
+   *   still calling `onEvent` for each event, so `onRunEnd` gets the real
+   *   outcome, with its output and files. Use it when `onRunEnd` saves replies.
+   *   Reading stops at `runTimeoutMs` at the latest.
+   *
+   * Only takes effect with `onEvent` or `onRunEnd` set: without them there is
+   * nothing to read the rest of the run for.
+   */
+  keepReadingAfterDisconnect?: boolean;
 
   // Access control. The hooks also apply through `handle`. Each may refuse by
   // returning or throwing a `Response` (see `deny`). If one throws anything
@@ -229,6 +259,9 @@ export function createSeclaiHandlers<Ctx>(
     agentId,
     apiVersion = DEFAULT_API_VERSION,
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
+    keepReadingAfterDisconnect = false,
+    onEvent,
+    onRunEnd,
     context,
     authorizeRun,
     authorizeUpload,
@@ -378,7 +411,10 @@ export function createSeclaiHandlers<Ctx>(
 
         const upstream = new AbortController();
         const abort = () => upstream.abort();
-        req.signal?.addEventListener("abort", abort, { once: true });
+        const keepReading = keepReadingAfterDisconnect && !!(onEvent || onRunEnd);
+        // Kept reading, the run isn't tied to the browser's request: the relay
+        // reads it to the end instead when the browser goes away.
+        if (!keepReading) req.signal?.addEventListener("abort", abort, { once: true });
 
         const events = client.runStreamingAgent(
           agentId,
@@ -394,8 +430,19 @@ export function createSeclaiHandlers<Ctx>(
           // A rejected run throws here, before any bytes are committed, so a bad
           // attachment or an empty credit balance can be a real HTTP error.
           const first = await events.next();
+          // `body` is the one that ran: after any `authorizeRun` rewrite.
+          const observer =
+            onEvent || onRunEnd
+              ? createRunObserver({ onEvent, onRunEnd }, { body, request: req }, { keepReading })
+              : undefined;
           return new Response(
-            relayRunEvents(first.done ? undefined : first.value, events, abort),
+            relayRunEvents(
+              first.done ? undefined : first.value,
+              events,
+              abort,
+              observer,
+              keepReading ? { keepReadingAfterDisconnect: true, signal: req.signal } : undefined,
+            ),
             { headers: SSE_HEADERS },
           );
         } catch (err) {
