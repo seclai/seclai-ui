@@ -1,16 +1,23 @@
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Profiler } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { AgentChat, AgentRunForm, SeclaiAgent, type AgentChatMessage } from "../src";
-import { jsonResponse, sse, sseResponse } from "./helpers";
+import {
+  AgentChat,
+  AgentRunForm,
+  SeclaiAgent,
+  type AgentChatMessage,
+  type AgentChatTurn,
+} from "../src";
+import { controlledResponse, jsonResponse, sse, sseResponse } from "./helpers";
 
 const RUN = "3f2b8c1e-7a4d-4e9b-9c11-0d5e6f7a8b9c";
 
 interface Routes {
   refs?: unknown;
   upload?: (file: File) => Response | Promise<Response>;
-  run?: (body: Record<string, unknown>) => Response;
+  run?: (body: Record<string, unknown>, init: RequestInit) => Response;
 }
 
 function stubApi({ refs = { requires_uploads: false }, upload, run }: Routes) {
@@ -23,7 +30,7 @@ function stubApi({ refs = { requires_uploads: false }, upload, run }: Routes) {
     if (url.endsWith("/run")) {
       const body = JSON.parse(init!.body as string);
       runBodies.push(body);
-      return run!(body);
+      return run!(body, init!);
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -672,6 +679,416 @@ describe("AgentChat attachments", () => {
     await screen.findByText("ok");
     expect(screen.queryByLabelText("Attach")).toBeNull();
     expect(runBodies[0]).toMatchObject({ input: "hi" });
+  });
+});
+
+describe("AgentChat saved sessions", () => {
+  const imageSlot = { name: "images", max: 2, content_types: ["image/*"] };
+  const png = (name: string) => new File([name], name, { type: "image/png" });
+
+  async function say(user: ReturnType<typeof userEvent.setup>, text: string) {
+    await user.type(screen.getByLabelText("Message"), text);
+    await user.click(screen.getByRole("button", { name: "Send" }));
+  }
+
+  const saved: AgentChatTurn[] = [
+    {
+      input: "Here's me",
+      files: [{ uploadId: "up-1", name: "me.png", contentType: "image/png", tag: "headshot" }],
+      output: "Here's a thumbnail",
+      attachments: [{ id: "img", name: "thumb.png", mime: "image/png", bytes: 10 }],
+      runId: "run-1",
+      status: "completed",
+      error: null,
+    },
+    { input: "again", output: "", runId: null, status: "failed", error: "Out of credits" },
+    { input: "and again", output: "Half a", runId: "run-3", status: "cancelled" },
+  ];
+
+  it("sends a controlled sessionId with every run", async () => {
+    const { runBodies } = stubApi({ run: () => completed("ok") });
+    const onTurnComplete = vi.fn();
+    const user = userEvent.setup();
+    render(<AgentChat sessionId="session-1" onTurnComplete={onTurnComplete} />);
+
+    await say(user, "first");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(1));
+    await say(user, "second");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(2));
+
+    expect(runBodies.map((b) => b.sessionId)).toEqual(["session-1", "session-1"]);
+    expect(onTurnComplete.mock.calls.map((call) => call[1])).toEqual([
+      { sessionId: "session-1" },
+      { sessionId: "session-1" },
+    ]);
+  });
+
+  it("reports the generated session id when there's no sessionId prop", async () => {
+    const { runBodies } = stubApi({ run: () => completed("ok") });
+    const onTurnComplete = vi.fn();
+    const user = userEvent.setup();
+    render(<AgentChat onTurnComplete={onTurnComplete} />);
+
+    await say(user, "first");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(1));
+    await say(user, "second");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(2));
+
+    const generated = runBodies[0]!.sessionId;
+    expect(typeof generated).toBe("string");
+    expect(runBodies[1]!.sessionId).toBe(generated);
+    expect(onTurnComplete.mock.calls[1]![1]).toEqual({ sessionId: generated });
+  });
+
+  it("renders initialTurns: text, files, output, images, errors and stops", () => {
+    stubApi({});
+    const { container } = render(<AgentChat initialTurns={saved} />);
+
+    expect(screen.getByText("Here's me")).toBeTruthy();
+    const files = screen.getByRole("list", { name: "Attached files" });
+    expect(within(files).getByText("me.png")).toBeTruthy();
+    expect(within(files).getByText("headshot")).toBeTruthy();
+    expect(container.querySelector(".seclai-file-thumb")).toBeNull();
+
+    expect(screen.getByText("Here's a thumbnail")).toBeTruthy();
+    expect((screen.getByAltText("thumb.png") as HTMLImageElement).getAttribute("src")).toBe(
+      "/api/seclai/download?runId=run-1&attachmentId=img&name=thumb.png",
+    );
+
+    expect(screen.getByRole("alert").textContent).toBe("Out of credits");
+    expect(screen.getByText("Half a")).toBeTruthy();
+    expect(screen.getByText("Stopped.")).toBeTruthy();
+    expect(container.querySelectorAll(".seclai-turn")).toHaveLength(6);
+  });
+
+  it("rebuilds attachment URLs against the current basePath and agentId", () => {
+    stubApi({});
+    render(<AgentChat basePath="/x" agentId="a1" initialTurns={saved} />);
+    expect(screen.getByAltText("thumb.png").getAttribute("src")).toBe(
+      "/x/a1/download?runId=run-1&attachmentId=img&name=thumb.png",
+    );
+  });
+
+  it("calls onTurnComplete once per run, for completed, failed and cancelled runs", async () => {
+    let turn = 0;
+    stubApi({
+      run: (_body, init) => {
+        turn++;
+        if (turn === 1) {
+          return completed("Done", {
+            attachments: [{ id: "img", name: "cat.png", mime: "image/png", bytes: 1 }],
+          });
+        }
+        if (turn === 2) return jsonResponse({ error: "Out of credits", status: 402 }, 402);
+        const held = controlledResponse(init.signal);
+        held.push(sse("init", { run_id: "run-3" }));
+        held.push(sse("stream_token", { token: "Half" }));
+        return held.response;
+      },
+    });
+    const onTurnComplete = vi.fn();
+    const user = userEvent.setup();
+    render(<AgentChat sessionId="s" onTurnComplete={onTurnComplete} />);
+
+    await say(user, "one");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(1));
+    await say(user, "two");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(2));
+    await say(user, "three");
+    expect(await screen.findByText("Half")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(3));
+    await act(async () => {});
+    expect(onTurnComplete).toHaveBeenCalledTimes(3);
+
+    expect(onTurnComplete.mock.calls.map((call) => call[0])).toEqual([
+      {
+        input: "one",
+        files: [],
+        output: "Done",
+        attachments: [{ id: "img", name: "cat.png", mime: "image/png", bytes: 1 }],
+        runId: RUN,
+        status: "completed",
+        error: null,
+      },
+      {
+        input: "two",
+        files: [],
+        output: "",
+        attachments: [],
+        runId: null,
+        status: "failed",
+        error: "Out of credits",
+      },
+      {
+        input: "three",
+        files: [],
+        output: "Half",
+        attachments: [],
+        runId: "run-3",
+        status: "cancelled",
+        error: null,
+      },
+    ]);
+  });
+
+  it("stores the typed text, and the sent input when onBeforeSend changes it", async () => {
+    stubApi({ run: () => completed("ok") });
+    const onTurnComplete = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AgentChat
+        onBeforeSend={({ input }) => (input === "same" ? input : `Note: ${input}`)}
+        onTurnComplete={onTurnComplete}
+      />,
+    );
+
+    await say(user, "hello");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(1));
+    await say(user, "same");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(2));
+
+    expect(onTurnComplete.mock.calls[0]![0]).toMatchObject({
+      input: "hello",
+      sentInput: "Note: hello",
+    });
+    expect(onTurnComplete.mock.calls[1]![0]).toMatchObject({ input: "same" });
+    expect(onTurnComplete.mock.calls[1]![0]).not.toHaveProperty("sentInput");
+  });
+
+  it("round-trips: turns from onTurnComplete restore the same transcript", async () => {
+    let turn = 0;
+    let upload = 0;
+    stubApi({
+      refs: { requires_uploads: false, accepted_attachments: [imageSlot] },
+      upload: () => jsonResponse({ id: `up-${upload++}`, status: "ready" }),
+      run: () =>
+        ++turn === 1
+          ? completed("Here's a cat", {
+              attachments: [{ id: "img", name: "cat.png", mime: "image/png", bytes: 1 }],
+            })
+          : jsonResponse({ error: "Out of credits", status: 402 }, 402),
+    });
+    const store: AgentChatTurn[] = [];
+    const user = userEvent.setup();
+    const live = render(
+      <AgentChat
+        sessionId="s"
+        attachButtons={[{ label: "+ Photo", tag: "photo" }]}
+        onBeforeSend={({ input, files }) => `${files.length} files. ${input}`}
+        onTurnComplete={(t) => store.push(JSON.parse(JSON.stringify(t)))}
+      />,
+    );
+
+    await user.upload(await screen.findByLabelText("+ Photo"), png("me.png"));
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false),
+    );
+    await say(user, "draw a cat");
+    await waitFor(() => expect(store).toHaveLength(1));
+    await say(user, "another");
+    await waitFor(() => expect(store).toHaveLength(2));
+    await act(async () => {});
+
+    const transcript = (container: HTMLElement) =>
+      container.querySelector(".seclai-turns")!.innerHTML;
+    const before = transcript(live.container);
+    expect(before).toContain("cat.png");
+    expect(before).toContain("me.png");
+    live.unmount();
+
+    const restored = render(<AgentChat sessionId="s" initialTurns={store} />);
+    expect(transcript(restored.container)).toBe(before);
+  });
+
+  it("resets the transcript and stops the stream when sessionId changes", async () => {
+    let held: ReturnType<typeof controlledResponse> | undefined;
+    const { runBodies } = stubApi({
+      run: (_body, init) => {
+        if (runBodies.length === 1) {
+          held = controlledResponse(init.signal);
+          return held.response;
+        }
+        return completed("Fresh reply");
+      },
+    });
+    const onTurnComplete = vi.fn();
+    const user = userEvent.setup();
+    const other: AgentChatTurn[] = [
+      { input: "Old question", output: "Old answer", runId: "r", status: "completed" },
+    ];
+    const { rerender } = render(
+      <AgentChat sessionId="a" initialTurns={saved} onTurnComplete={onTurnComplete} />,
+    );
+
+    await say(user, "pending");
+    await waitFor(() => expect(held).toBeDefined());
+    held!.push(sse("stream_token", { token: "Streaming" }));
+    expect(await screen.findByText("Streaming")).toBeTruthy();
+    await user.type(screen.getByLabelText("Message"), "draft");
+
+    rerender(<AgentChat sessionId="b" initialTurns={other} onTurnComplete={onTurnComplete} />);
+
+    expect(screen.queryByText("Here's me")).toBeNull();
+    expect(screen.queryByText("pending")).toBeNull();
+    expect(screen.getByText("Old question")).toBeTruthy();
+    expect(screen.getByText("Old answer")).toBeTruthy();
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(1));
+    expect(onTurnComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ input: "pending", output: "Streaming", status: "cancelled" }),
+      { sessionId: "a" },
+    );
+    expect(screen.queryByText("Streaming")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe("");
+
+    await say(user, "next");
+    expect(await screen.findByText("Fresh reply")).toBeTruthy();
+    expect(runBodies[1]!.sessionId).toBe("b");
+    expect(screen.queryByText("pending")).toBeNull();
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+  });
+
+  it("adopts its own generated id as sessionId without resetting or stopping the stream", async () => {
+    let held: ReturnType<typeof controlledResponse> | undefined;
+    const { runBodies } = stubApi({
+      run: (_body, init) => {
+        if (runBodies.length === 2) {
+          held = controlledResponse(init.signal);
+          return held.response;
+        }
+        return completed("ok");
+      },
+    });
+    const onTurnComplete = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(<AgentChat onTurnComplete={onTurnComplete} />);
+
+    await say(user, "one");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(1));
+    const generated = onTurnComplete.mock.calls[0]![1].sessionId as string;
+    expect(runBodies[0]!.sessionId).toBe(generated);
+
+    await say(user, "two");
+    await waitFor(() => expect(held).toBeDefined());
+    held!.push(sse("stream_token", { token: "Streaming" }));
+    expect(await screen.findByText("Streaming")).toBeTruthy();
+    await user.type(screen.getByLabelText("Message"), "draft");
+
+    // The app saved under context.sessionId and now passes it back.
+    rerender(
+      <AgentChat sessionId={generated} initialTurns={[]} onTurnComplete={onTurnComplete} />,
+    );
+
+    expect(screen.getByText("one")).toBeTruthy();
+    expect(screen.getByText("two")).toBeTruthy();
+    expect(screen.getByText("Streaming")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe("draft");
+
+    held!.push(sse("stream_token", { token: " on" }));
+    held!.push(sse("done", { run_id: RUN, status: "completed", output: "Streaming on" }));
+    held!.close();
+    expect(await screen.findByText("Streaming on")).toBeTruthy();
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(2));
+    expect(onTurnComplete.mock.calls[1]).toEqual([
+      expect.objectContaining({ input: "two", output: "Streaming on", status: "completed" }),
+      { sessionId: generated },
+    ]);
+
+    await user.clear(screen.getByLabelText("Message"));
+    await say(user, "three");
+    await waitFor(() => expect(onTurnComplete).toHaveBeenCalledTimes(3));
+    expect(runBodies.map((b) => b.sessionId)).toEqual([generated, generated, generated]);
+    expect(screen.getByText("one")).toBeTruthy();
+    expect(screen.getByText("Streaming on")).toBeTruthy();
+  });
+
+  it("treats any other id after an uncontrolled start as a switch", async () => {
+    stubApi({ run: () => completed("ok") });
+    const user = userEvent.setup();
+    const { rerender } = render(<AgentChat />);
+
+    await say(user, "one");
+    await screen.findByText("ok");
+    rerender(<AgentChat sessionId="someone-else" />);
+
+    expect(screen.queryByText("one")).toBeNull();
+    expect(screen.queryByText("ok")).toBeNull();
+  });
+
+  it("never shows the old run's stream under the new session, not even for one commit", async () => {
+    let held: ReturnType<typeof controlledResponse> | undefined;
+    const { runBodies } = stubApi({
+      run: (_body, init) => {
+        held = controlledResponse(init.signal);
+        return held.response;
+      },
+    });
+    const user = userEvent.setup();
+    let session = "a";
+    const commits: { session: string; text: string; busy: string | null }[] = [];
+    // Profiler's onRender runs in the commit, after the DOM has been updated.
+    const record = () =>
+      commits.push({
+        session,
+        text: document.body.textContent ?? "",
+        busy: document.querySelector(".seclai-turns")?.getAttribute("aria-busy") ?? null,
+      });
+    const chat = () => (
+      <Profiler id="chat" onRender={record}>
+        <AgentChat sessionId={session} />
+      </Profiler>
+    );
+    const { rerender } = render(chat());
+
+    await say(user, "pending");
+    await waitFor(() => expect(held).toBeDefined());
+    held!.push(sse("stream_token", { token: "Streaming" }));
+    expect(await screen.findByText("Streaming")).toBeTruthy();
+
+    session = "b";
+    rerender(chat());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).toBeNull());
+
+    const after = commits.filter((c) => c.session === "b");
+    expect(after.length).toBeGreaterThan(0);
+    for (const commit of after) {
+      expect(commit.text).not.toContain("Streaming");
+      expect(commit.text).not.toContain("Thinking");
+      expect(commit.text).not.toContain("pending");
+      expect(commit.busy).toBe("false");
+    }
+    expect(runBodies).toHaveLength(1);
+  });
+
+  it("starts a new generated session id when the sessionId prop is removed", async () => {
+    const { runBodies } = stubApi({ run: () => completed("ok") });
+    const user = userEvent.setup();
+    const { rerender } = render(<AgentChat />);
+
+    await say(user, "one");
+    await screen.findByText("ok");
+    rerender(<AgentChat sessionId="x" />);
+    rerender(<AgentChat />);
+    await say(user, "two");
+    await screen.findByText("ok");
+
+    expect(runBodies[1]!.sessionId).not.toBe(runBodies[0]!.sessionId);
+  });
+
+  it("ignores changes to initialTurns after mount", () => {
+    stubApi({});
+    const { rerender } = render(<AgentChat sessionId="a" initialTurns={saved} />);
+    rerender(
+      <AgentChat
+        sessionId="a"
+        initialTurns={[{ input: "Replaced", output: "Nope", status: "completed" }]}
+      />,
+    );
+
+    expect(screen.getByText("Here's me")).toBeTruthy();
+    expect(screen.queryByText("Replaced")).toBeNull();
   });
 });
 

@@ -58,6 +58,58 @@ To tell files apart, add named buttons with tags, then use the tags in `onBefore
 | `attachButtons` | `{ label: string; tag?: string }[]`. Replaces the single Attach button. Dropped and pasted files have no tag |
 | `onBeforeSend` | `({ input, files }) => string \| void`, where `files` are `{ uploadId, name, contentType, tag? }`. Return a string to send it in place of the typed text |
 
+### Saved sessions
+
+By default `AgentChat` makes up a session id on the first message and keeps the transcript in memory, so a reload starts over. To let users go back to a conversation, give it the session id and the turns you saved, and save each new turn as it finishes:
+
+```tsx
+import { AgentChat, type AgentChatTurn } from "@seclai/react";
+
+function SavedChat({ sessionId, turns }: { sessionId: string; turns: AgentChatTurn[] }) {
+  return (
+    <AgentChat
+      sessionId={sessionId}
+      initialTurns={turns}
+      onTurnComplete={(turn, { sessionId }) =>
+        fetch(`/api/chats/${sessionId}/turns`, { method: "POST", body: JSON.stringify(turn) })
+      }
+    />
+  );
+}
+
+// Load the turns from your API first, e.g. GET /api/chats/:id/turns, then:
+<SavedChat sessionId={id} turns={turns} />;
+```
+
+Each `AgentChatTurn` is one exchange, a message and its reply, as plain JSON:
+
+```ts
+{
+  input: string;               // what the user typed
+  sentInput?: string;          // what was sent, when onBeforeSend changed it
+  files?: { uploadId, name, contentType, tag? }[];
+  output: string;              // for a failed or cancelled run, whatever had streamed
+  attachments?: { id, name, mime, bytes }[];
+  runId?: string | null;
+  status: "completed" | "failed" | "cancelled";
+  error?: string | null;
+}
+```
+
+- `onTurnComplete` is called once per run, when it completes, fails or is cancelled. Store what it gives you as is, and pass the list back as `initialTurns`. Its second argument has the run's `sessionId`, which is the generated one when you don't pass `sessionId`. Always save under that `context.sessionId`, not a session id captured from the surrounding scope: a run cut short by a switch reports through the latest `onTurnComplete`, after your app has moved on to the next conversation.
+- Attachments are stored without URLs. The chat rebuilds them from `runId` and the attachment id through your download handler, so they don't go stale, and restored images show as they did live. Restored user files show as name chips, without thumbnails.
+- `initialTurns` is read when the chat mounts and when `sessionId` changes. Later changes to it are ignored, as with an input's `defaultValue`.
+- Changing `sessionId` switches conversations: the transcript resets to `initialTurns`, the composer clears, and a reply still streaming stops. That run is still reported to `onTurnComplete`, as cancelled, with the old session id. Remounting with a `key` works too.
+- The one exception: a chat started without `sessionId` can be handed the id it generated (the `context.sessionId` you saved under), and it keeps its transcript, composer and any reply still streaming. For a new chat, though, prefer generating the id up front (for example with `crypto.randomUUID()`) and passing it from the first message, so the id you save under and the one you pass never differ.
+
+Saving from the browser misses turns when the user closes the tab mid-run. If your server uses the `onRunEnd` hook of `@seclai/handlers`, saving there is more reliable, and the chat then only needs `sessionId` and `initialTurns`.
+
+| Prop | |
+|---|---|
+| `sessionId` | Sent with every run. Generated on the first message when left out |
+| `initialTurns` | `AgentChatTurn[]` to show on mount, or when `sessionId` changes |
+| `onTurnComplete` | `(turn: AgentChatTurn, { sessionId }) => void`, once per finished run |
+
 ### `useAgentRun`
 
 Build your own UI on the hook:
