@@ -15,7 +15,7 @@ export function useAcceptedAttachments(endpoints: AgentEndpoints): AcceptedAttac
   useEffect(() => {
     const controller = new AbortController();
     setState({ slots: null, error: null });
-    fetchAttachmentReferences(endpoints, controller.signal)
+    fetchAttachmentReferences(endpoints, { signal: controller.signal })
       .then((refs) => setState({ slots: refs.accepted_attachments ?? [], error: null }))
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;

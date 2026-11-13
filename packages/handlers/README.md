@@ -52,6 +52,104 @@ export const ALL: APIRoute = ({ request }) => seclai.handle(request);
 | `agentId` | Required | The agent to run |
 | `apiVersion` | `2026-10-28` | Dated API version. Must be `2026-10-16` or later |
 | `runTimeoutMs` | 11 minutes | How long a streaming run may take |
+| `onEvent` | None | `(event, ctx)`: called with each run event before it is relayed. See [Run callbacks](#run-callbacks) |
+| `onRunEnd` | None | `(outcome, ctx)`: called once per run with how it ended. See [Run callbacks](#run-callbacks) |
+| `keepReadingAfterDisconnect` | `false` | Keep reading a run after the browser leaves, so `onRunEnd` gets its real outcome. See [Saving replies after a disconnect](#saving-replies-after-a-disconnect) |
+| `context` | None | `(req)`: your per-request context, such as the signed-in user, passed to every hook. See [Access control](#access-control) |
+| `authorizeRun` | None | `(req, body, ctx)`: refuse or rewrite a run. See [Access control](#access-control) |
+| `authorizeUpload` | None | `(req, file, ctx)`: refuse an upload before it reaches Seclai |
+| `authorizeDownload` | None | `(req, { runId, attachmentId }, ctx)`: return `true` to serve the file |
+| `upload` | None | Size limit, content-type check and hook for `upload`, below |
+
+### Upload options
+
+```ts
+const seclai = createSeclaiHandlers({
+  apiKey: process.env.SECLAI_API_KEY!,
+  agentId: process.env.SECLAI_AGENT_ID!,
+  upload: {
+    maxBytes: 4 * 1024 * 1024,
+    checkContentType: true,
+    async onUpload(file, result, req) {
+      await saveCopy(result.id, file);
+    },
+  },
+});
+```
+
+| Option | Default | |
+|---|---|---|
+| `maxBytes` | No limit | Largest file accepted, in bytes. A bigger one gets a 413 |
+| `checkContentType` | `false` | Give a 415 to a file whose type none of the agent's attachment slots accepts |
+| `onUpload(file, result, req)` | None | Called after a successful upload. Return a `Response` to replace the default JSON |
+
+The size checks and the content-type check refuse a file before it reaches the API, and `onUpload` runs only after the API has accepted one. In order, `upload` checks the size, then calls [`authorizeUpload`](#access-control), then checks the content type, so a refused caller never triggers the slot lookup.
+
+- **`maxBytes`** is checked against `content-length` first, so a request that declares an oversized body is refused before it's read. Without `content-length`, as with a chunked body, the bytes are counted as they stream and reading stops with a 413 once they pass the limit. Both checks allow 64 KB for the multipart envelope, and the file's own size is checked once the form is read.
+- **`checkContentType`** reads the slots with `getAgentAttachmentReferences` and reuses them for 60 seconds, so an edit to the agent's slots takes up to a minute to apply. A slot type is exact, like `application/pdf`, or a wildcard, like `image/*`. A slot with no types accepts every file. A file of unknown type isn't checked and goes on to the API, which decides: browsers send no type for `.md`, some `.csv` files or HEIC on Windows, and such a file arrives as `application/octet-stream`. An agent with no slots takes no typed files, so they all get a 415. If the lookup fails, the upload is refused with the error from the API, usually a 502, and the next upload tries again. Slots' `name_pattern` isn't checked here: the API checks it when the run starts. The slots are kept per `createSeclaiHandlers` instance, so where the handlers are created per request, as on Cloudflare Workers, every upload makes its own lookup.
+- **`onUpload`** receives the `File`, the `{ id, status, filename, content_type, file_size }` the handler would return, and the `Request`, whose body has already been read. Returning nothing keeps the default response. If it throws, the browser gets a 500 with a generic message. The file is already on Seclai by then.
+
+### Access control
+
+Three hooks check requests against your own data before they reach the API. They apply to the individual handlers and to `handle`, and may be sync or async.
+
+```ts
+import { createSeclaiHandlers, deny } from "@seclai/handlers";
+
+const seclai = createSeclaiHandlers({
+  apiKey: process.env.SECLAI_API_KEY!,
+  agentId: process.env.SECLAI_AGENT_ID!,
+
+  // Runs once per hooked request, only when a hook needs it.
+  async context(req) {
+    const user = await getUser(req);
+    if (!user) throw deny(401, "Sign in first.");
+    return { user };
+  },
+
+  async authorizeRun(req, body, { user }) {
+    if (body.sessionId && !(await db.sessionBelongsTo(body.sessionId, user.id))) {
+      return deny(403, "That isn't your conversation.");
+    }
+    // Returning nothing runs the body as it is.
+  },
+
+  authorizeUpload: (req, file, { user }) => user.canUpload,
+
+  async authorizeDownload(req, { runId }, { user }) {
+    return db.runBelongsTo(runId, user.id);
+  },
+});
+```
+
+**Allowing and refusing**
+
+| Hook | Allow | Refuse |
+|---|---|---|
+| `authorizeRun` | Return nothing or `true`, or a rewritten body to run instead | `false` (403), or a `Response` |
+| `authorizeUpload` | Return nothing or `true` | `false` (403), or a `Response` |
+| `authorizeDownload` | Return `true` | `false` (404), or a `Response`. Returning nothing also refuses, and logs a warning |
+
+- **Any hook can refuse by throwing a `Response`**, or by returning one, so a check deep in your data layer can `throw deny(...)`. The `context` function can too, which refuses every hooked request at once.
+- **`deny(status, message)`** builds the same `{ error, status }` JSON the handlers use for their own errors. `@seclai/react` shows the `error` text to the user.
+- **`authorizeDownload` fails closed** because it guards stored files: anything but `true` or a `Response` is a 404, the same as a missing file, so a refusal doesn't confirm the file exists.
+- **Rewrites.** `authorizeRun` gets the body after `run` has validated it. It may return a rewritten body, for example to add context to `input` or swap in server-side `uploadIds`. The rewrite is validated again.
+- **Errors.** If a hook or `context` throws anything other than a `Response`, the browser gets a 500 with a generic message, and the error is logged with `console.error`. A rewrite that fails validation is also a logged 500, with the reason.
+
+**Context your framework already has**
+
+When your framework has already resolved the user, pass it with `withContext` instead of the `context` option. It returns the same handlers with that context bound, so they keep the `(req) => Response` shape:
+
+```ts
+// React Router: app/routes/api.seclai.$action.ts
+const seclai = createSeclaiHandlers<{ userId: string }>({ apiKey, agentId, authorizeRun, authorizeDownload });
+
+export const loader = ({ request, context }: Route.LoaderArgs) =>
+  seclai.withContext({ userId: context.get(userContext).id }).handle(request);
+export const action = loader;
+```
+
+The context's type is inferred from the `context` option, or set as the type parameter. Without a `context` option, a typed context is only reachable through `withContext`: TypeScript doesn't offer `seclai.handle` on its own, so a route can't call the hooks without the context. A context type that includes `undefined` keeps the plain handlers.
 
 ## The run stream
 
@@ -61,11 +159,83 @@ export const ALL: APIRoute = ({ request }) => seclai.handle(request);
 - If the stream fails after it has started, it ends with an `error` event carrying `{ error }`.
 - When the browser disconnects, the upstream connection closes. **The run itself keeps going on Seclai** and may keep using credits.
 
+## Run callbacks
+
+`onEvent` and `onRunEnd` let the server see each run, for example to store a chat's history without trusting the browser to report it. Both get a `ctx` of `{ body, request }`: the validated `run` request body and the `Request` itself. It is the same object for every call in a run.
+
+```ts
+const seclai = createSeclaiHandlers({
+  apiKey: process.env.SECLAI_API_KEY!,
+  agentId: process.env.SECLAI_AGENT_ID!,
+  async onRunEnd(outcome, { body }) {
+    if (!body.sessionId) return;
+    await db.messages.insert({
+      sessionId: body.sessionId,
+      role: "assistant",
+      runId: outcome.runId,
+      status: outcome.status,
+      content: outcome.output,
+      attachments: outcome.attachments,
+      error: outcome.error,
+    });
+  },
+});
+```
+
+**`onEvent(event, ctx)`** gets each event as `{ event, data }`, with `data` parsed from JSON, in order. Each call is awaited before its event is relayed. It also sees the `error` event the handler sends when the upstream connection fails. The one event it can miss is a first event the browser never received because it disconnected straight away; that event still counts toward the outcome.
+
+**`onRunEnd(outcome, ctx)`** is called exactly once for each run that started streaming. It is awaited before the final `done`, `error` or `timeout` event is relayed, so **whatever it stores is in place by the time the browser sees `done`**, and the browser can reload history right away. For `done`, `onEvent` runs first, then `onRunEnd`, then the event is relayed.
+
+| `outcome` field | |
+|---|---|
+| `runId` | From `init` or `done`. `null` if the stream ended before either |
+| `status` | `completed`, `failed` or `cancelled` |
+| `output` | The run's output when it completed. Otherwise the text streamed in `stream_token` events so far |
+| `attachments` | Files from `done`, as `{ id, name, mime }`. Fetch them with `download` |
+| `error` | Why the run failed, or `null` |
+
+| The run stream... | `status` | `error` |
+|---|---|---|
+| Sends `done` | `completed`, or `failed` if the run failed | The last attempt's error |
+| Sends `error`, or the upstream connection fails | `failed` | The event's `error` |
+| Sends `timeout`: the API stopped streaming before the run ended | `failed` | `Stopped waiting for the run. It may still finish on Seclai.` |
+| Ends with none of these | `failed` | `The stream ended without a result.` |
+| Is cancelled by the browser | `cancelled`, unless `keepReadingAfterDisconnect` is on | `null` |
+
+`cancelled` means the browser left. The run itself keeps going on Seclai. If the upstream connection fails or ends after the browser has left, that is reported as `cancelled` too, but an `error` or `timeout` event from the API is still `failed`. If the browser leaves while a callback is handling `done`, `error` or `timeout`, that event's outcome is reported.
+
+When `runTimeoutMs` runs out, the stream gets an `error` event, `Timed out waiting for the agent run to finish.`, not `timeout`. The time spent awaiting your callbacks counts against `runTimeoutMs`.
+
+If `onEvent` or `onRunEnd` throws or rejects, the handler logs the error with `console.error`, closes the upstream, and ends the stream with `event: error` carrying `{ "error": "The server could not process the run." }`, in place of the event it was handling. If `onRunEnd` hadn't been called yet, it is called once with `status: "failed"`, unless the browser had already disconnected, in which case the outcome is `cancelled` (with `keepReadingAfterDisconnect` on, it is `failed` either way). A throw during a cancel is only logged. A callback that never settles holds up the stream, and a cancel waits for a callback still running, so put a timeout on slow writes.
+
+### Saving replies after a disconnect
+
+By default, when the browser leaves (it closes the tab, navigates to another chat, or aborts the request), the handler stops reading the run and `onRunEnd` reports `cancelled` with the text streamed so far. The run itself still finishes on Seclai and is billed, and a chat agent's memory keeps its reply, so an app that saves replies ends up with a turn the agent remembers but the app never showed.
+
+Set `keepReadingAfterDisconnect: true` to keep reading the run in the background instead:
+
+```ts
+const seclai = createSeclaiHandlers({
+  apiKey, agentId,
+  keepReadingAfterDisconnect: true,
+  onRunEnd: (outcome, { body }) => db.saveReply(body.sessionId, outcome),
+});
+```
+
+- **Callbacks.** The browser stops getting events, but `onEvent` still gets each one, and `onRunEnd` gets the run's real outcome with its output and files.
+- **Outcomes.** A lost connection or a quiet end is reported as `failed`, since the browser leaving no longer stops the upstream, and `cancelled` doesn't occur. A callback that throws during the background reading is `failed` too.
+- **Unread responses.** The handler also watches the request's signal, so it reads on even when the framework drops the response unread after the browser aborts. React Router does this when the browser leaves before the response starts.
+- **Limits.** Reading the upstream stops at `runTimeoutMs` at the latest, and stops at once if a callback throws. A callback that never settles isn't bounded by it, so put a timeout on slow writes.
+- **Show the reply when the user comes back.** For example, reload the conversation when it ends with a message that has no reply yet.
+- **Serverless platforms** may freeze or end the function when the response closes, which cuts the background reading short. Use it on long-running servers, or check your platform's background-work support, such as `waitUntil`.
+
+The option only takes effect with `onEvent` or `onRunEnd` set.
+
 ## Limits to know before deploying
 
-- **The endpoints have no auth.** Anyone who can reach them can run your agent on your credits. Put your own access control or rate limiting in front of a public deployment.
-- **The API key is account-wide.** `download` checks that ids are well formed, but the API only checks that a run belongs to the account, not to this agent. Anyone holding a run's id and a file's id from the same account could fetch that file. Run ids are random UUIDs, so they can't be guessed.
-- **Uploads pass through your function**, so your platform's body limit applies, not the API's 200 MB: about 4.5 MB on Vercel and 6 MB on Netlify. The API has no CORS, so the browser can't upload to it directly.
+- **The endpoints have no auth by default.** Anyone who can reach them can run your agent on your credits. Use the [access-control hooks](#access-control) to check the caller, and put rate limiting in front of a public deployment. `attachment-references` has no hook, so guard that route yourself if the agent's accepted files are sensitive.
+- **The API key is account-wide.** `download` checks that ids are well formed, but the API only checks that a run belongs to the account, not to this agent. Without [`authorizeDownload`](#access-control), anyone holding a run's id and a file's id from the same account could fetch that file. Run ids are random UUIDs, so they can't be guessed, but only your app knows which runs a caller may read.
+- **Uploads pass through your function**, so your platform's body limit applies, not the API's 200 MB: about 4.5 MB on Vercel and 6 MB on Netlify. The API has no CORS, so the browser can't upload to it directly. Set `upload.maxBytes` below that limit so the browser gets a clear 413 instead of the platform's error, and `upload.checkContentType` to refuse files the agent can't use before they're sent on.
 - **Your platform's function duration limit** may end a long run before `runTimeoutMs` does.
 
 ## Runtimes
