@@ -887,6 +887,300 @@ describe("run callbacks", () => {
   });
 });
 
+describe("keepReadingAfterDisconnect", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** An upstream whose events arrive when the test says, and which honours the abort signal. */
+  function upstream() {
+    const queue: AgentRunEvent[] = [];
+    let wake: (() => void) | undefined;
+    let ended = false;
+    let failure: unknown;
+    let signal: AbortSignal | undefined;
+    const reads: string[] = [];
+    async function* gen(): AsyncGenerator<AgentRunEvent, void, undefined> {
+      for (;;) {
+        if (queue.length) {
+          const e = queue.shift()!;
+          reads.push(e.event);
+          yield e;
+          continue;
+        }
+        if (failure) throw failure;
+        if (ended) return;
+        await new Promise<void>((resolve, reject) => {
+          wake = resolve;
+          if (signal?.aborted) reject(new Error("aborted"));
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      }
+    }
+    const ch = {
+      reads,
+      get signal() {
+        return signal!;
+      },
+      events(_agent: string, _body: unknown, opts: { signal: AbortSignal }) {
+        signal = opts.signal;
+        return gen();
+      },
+      push(...events: AgentRunEvent[]) {
+        queue.push(...events);
+        wake?.();
+      },
+      end() {
+        ended = true;
+        wake?.();
+      },
+      fail(err: unknown) {
+        failure = err;
+        wake?.();
+      },
+    };
+    return ch;
+  }
+
+  const INIT = { event: "init", data: { run_id: RUN } };
+  const TOKEN = { event: "stream_token", data: { token: "Hi" } };
+  const DONE = {
+    event: "done",
+    data: { run_id: RUN, status: "completed", output: "Hi there", attachments: [{ id: "a1", name: "x.png", mime: "image/png" }] },
+  };
+
+  function setup(opts: Partial<SeclaiHandlersOptions> = {}) {
+    const up = upstream();
+    client.runStreamingAgent.mockImplementation(up.events);
+    const outcomes: RunOutcome[] = [];
+    const seen: string[] = [];
+    const seclai = createSeclaiHandlers({
+      apiKey: "k",
+      agentId: AGENT,
+      keepReadingAfterDisconnect: true,
+      onEvent: (e) => void seen.push(e.event),
+      onRunEnd: (o) => void outcomes.push(o),
+      ...opts,
+    });
+    return { up, outcomes, seen, seclai };
+  }
+
+  it("keeps reading after the browser cancels, and reports the real outcome", async () => {
+    const { up, outcomes, seen, seclai } = setup();
+    up.push(INIT);
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+
+    expect(up.signal.aborted).toBe(false);
+    up.push(TOKEN, DONE);
+    up.end();
+
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]).toEqual({
+      runId: RUN,
+      status: "completed",
+      output: "Hi there",
+      attachments: [{ id: "a1", name: "x.png", mime: "image/png" }],
+      error: null,
+    });
+    expect(seen).toEqual(["init", "stream_token", "done"]);
+  });
+
+  it("reads a response that is never read, once the request aborts", async () => {
+    const { up, outcomes, seen, seclai } = setup();
+    up.push(INIT);
+    const browser = new AbortController();
+    // The framework drops this response unread, as React Router does after an abort.
+    await seclai.run(runRequest({ input: "hi" }, { signal: browser.signal }));
+    browser.abort();
+    up.push(TOKEN, DONE);
+    up.end();
+
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]!.status).toBe("completed");
+    // The buffered first event reaches onEvent too: the browser never got it.
+    expect(seen).toEqual(["init", "stream_token", "done"]);
+  });
+
+  it("reads and handles events in order when the browser cancels during a pending read", async () => {
+    const seen: string[] = [];
+    let active = 0;
+    let overlapped = false;
+    const { up, outcomes, seclai } = setup({
+      async onEvent(e) {
+        active += 1;
+        if (active > 1) overlapped = true;
+        const token = (e.data as { token?: string }).token;
+        // The first token's handler is slow: a second reader would get ahead of it.
+        if (token === "A") await new Promise((r) => setTimeout(r, 30));
+        seen.push(token ?? e.event);
+        active -= 1;
+      },
+    });
+    up.push(INIT);
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    const pendingRead = reader.read(); // the pull is now waiting on the upstream
+    await new Promise((r) => setTimeout(r, 0));
+    void reader.cancel();
+    void pendingRead.catch(() => {});
+
+    up.push(
+      { event: "stream_token", data: { token: "A" } },
+      { event: "stream_token", data: { token: "B" } },
+      DONE,
+    );
+    up.end();
+
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(seen).toEqual(["init", "A", "B", "done"]);
+    expect(overlapped).toBe(false);
+    expect(up.reads).toEqual(["init", "stream_token", "stream_token", "done"]);
+  });
+
+  it("reports a lost connection after the browser left as failed, not cancelled", async () => {
+    const { up, outcomes, seclai } = setup();
+    up.push(INIT);
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    up.push(TOKEN);
+    up.fail(new Error("socket reset"));
+
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]).toMatchObject({ status: "failed", output: "Hi", runId: RUN });
+  });
+
+  it("reports a quiet end after the browser left as failed", async () => {
+    const { up, outcomes, seclai } = setup();
+    up.push(INIT);
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    up.end();
+
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]).toMatchObject({ status: "failed", error: "The stream ended without a result." });
+  });
+
+  it("stops the upstream and reports failed once when a callback throws in the background", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { up, outcomes, seclai } = setup({
+      onEvent: (e) => {
+        if (e.event === "stream_token") throw new Error("db down");
+      },
+    });
+    up.push(INIT);
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    up.push(TOKEN);
+
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]!.status).toBe("failed");
+    expect(up.signal.aborted).toBe(true);
+    up.push(DONE);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(outcomes).toHaveLength(1);
+  });
+
+  it("reports once when the request aborts after the run finished normally", async () => {
+    const { up, outcomes, seclai } = setup();
+    up.push(INIT, DONE);
+    up.end();
+    const browser = new AbortController();
+    const res = await seclai.run(runRequest({ input: "hi" }, { signal: browser.signal }));
+    await res.text();
+    browser.abort();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]!.status).toBe("completed");
+  });
+
+  it("doesn't send keepalives after the browser left", async () => {
+    vi.useFakeTimers();
+    try {
+      const { up, seclai } = setup();
+      up.push(INIT);
+      const res = await seclai.run(runRequest({ input: "hi" }));
+      const reader = res.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      // An enqueue on the cancelled stream would throw from the timer.
+      expect(() => vi.advanceTimersByTime(KEEPALIVE_INTERVAL_MS * 3)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes the stream when the signal starts the background reading, so a waiting read settles", async () => {
+    const { up, outcomes, seclai } = setup();
+    up.push(INIT);
+    const browser = new AbortController();
+    const res = await seclai.run(runRequest({ input: "hi" }, { signal: browser.signal }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    const waiting = reader.read(); // the adapter's write loop, waiting on the upstream
+    browser.abort();
+
+    await expect(waiting).resolves.toEqual({ done: true, value: undefined });
+    up.push(TOKEN, DONE);
+    up.end();
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]!.status).toBe("completed");
+  });
+
+  it("tells the observer once when it starts reading in the background", async () => {
+    const onDisconnect = vi.fn();
+    const ch = upstream();
+    const events = ch.events("a", {}, { signal: new AbortController().signal });
+    ch.push(INIT);
+    const first = (await events.next()).value as AgentRunEvent;
+    const browser = new AbortController();
+    const stream = relayRunEvents(
+      first,
+      events,
+      () => {},
+      { onEvent() {}, onClose() {}, onError() {}, onDisconnect },
+      { keepReadingAfterDisconnect: true, signal: browser.signal },
+    );
+    const reader = stream.getReader();
+    await reader.read();
+    browser.abort();
+    await reader.cancel();
+    expect(onDisconnect).toHaveBeenCalledOnce();
+    ch.end();
+  });
+
+  it("does nothing without onEvent or onRunEnd: the upstream stops as before", async () => {
+    const up = upstream();
+    client.runStreamingAgent.mockImplementation(up.events);
+    const seclai = createSeclaiHandlers({ apiKey: "k", agentId: AGENT, keepReadingAfterDisconnect: true });
+    up.push(INIT);
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    expect(up.signal.aborted).toBe(true);
+  });
+
+  it("is off by default: the browser leaving cancels the run's reading", async () => {
+    const { up, outcomes, seclai } = setup({ keepReadingAfterDisconnect: undefined });
+    up.push(INIT);
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    expect(up.signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]!.status).toBe("cancelled");
+  });
+});
+
 describe("download", () => {
   const downloadUrl = (params: Record<string, string>) =>
     `${URL_BASE}/download?${new URLSearchParams(params)}`;

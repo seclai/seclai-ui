@@ -88,8 +88,15 @@ function toAttachments(raw: unknown): RunOutcomeAttachment[] {
 export function createRunObserver(
   callbacks: { onEvent?: RunEventCallback; onRunEnd?: RunEndCallback },
   ctx: RunCallbackContext,
+  { keepReading = false }: { keepReading?: boolean } = {},
 ): RunStreamObserver {
   const { onEvent, onRunEnd } = callbacks;
+  /**
+   * Whether the browser leaving stopped the upstream. When the relay keeps
+   * reading after a disconnect it doesn't, so a lost connection or a quiet end
+   * is a real failure, not the browser leaving.
+   */
+  const browserStoppedUpstream = () => !keepReading && !!ctx.request.signal?.aborted;
   let runId: string | null = null;
   let text = "";
   /** How the run ended, once an event has said so. Not reported until its `onEvent` resolves. */
@@ -157,7 +164,7 @@ export function createRunObserver(
         // but it was the browser leaving. An `error` from the API is a real
         // failure either way.
         terminal =
-          source === "connection-lost" && ctx.request.signal?.aborted
+          source === "connection-lost" && browserStoppedUpstream()
             ? cancelled()
             : failed(typeof payload.error === "string" && payload.error ? payload.error : FAILED_MESSAGE);
         return;
@@ -182,7 +189,7 @@ export function createRunObserver(
       switch (reason) {
         case "end":
           // See `record`: an upstream aborted by the browser can end quietly too.
-          return end(terminal ?? (ctx.request.signal?.aborted ? cancelled() : failed(NO_RESULT_MESSAGE)));
+          return end(terminal ?? (browserStoppedUpstream() ? cancelled() : failed(NO_RESULT_MESSAGE)));
         case "error":
           return end(failed(OBSERVER_ERROR_MESSAGE));
         case "cancel":

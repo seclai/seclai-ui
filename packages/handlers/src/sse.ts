@@ -49,12 +49,30 @@ export interface RunStreamObserver {
    */
   onUnrelayed?(event: AgentRunEvent): void;
   /**
+   * Called once when the browser goes away and the relay keeps reading the run
+   * in the background (see {@link RelayOptions.keepReadingAfterDisconnect}).
+   */
+  onDisconnect?(): void;
+  /**
    * Called once when the stream stops, whatever the reason, before it closes.
    * After a terminal event this is just the end of the stream.
    */
   onClose(reason: RunCloseReason): void | Promise<void>;
   /** Called with whatever `onEvent` or `onClose` threw. */
   onError(err: unknown): void;
+}
+
+/** Options for {@link relayRunEvents}. */
+export interface RelayOptions {
+  /**
+   * When the browser goes away, keep reading the run to its end, passing each
+   * event to the observer, instead of stopping the upstream. Needs `signal` to
+   * also cover a response that is never read: some frameworks drop the
+   * response unread when the request aborts while it is being produced.
+   */
+  keepReadingAfterDisconnect?: boolean;
+  /** The browser request's signal. */
+  signal?: AbortSignal;
 }
 
 /** The `error` frame sent in place of an event when an observer hook throws. */
@@ -73,13 +91,16 @@ export const OBSERVER_ERROR_MESSAGE = "The server could not process the run.";
  * @param events - The rest of the run's events.
  * @param abort - Stops the upstream request when the browser disconnects.
  * @param observer - Sees each event before it is relayed, and how the stream stopped.
+ * @param options - See {@link RelayOptions}. Only useful with an `observer`.
  */
 export function relayRunEvents(
   first: AgentRunEvent | undefined,
   events: AsyncGenerator<AgentRunEvent, void, undefined>,
   abort: () => void,
   observer?: RunStreamObserver,
+  options: RelayOptions = {},
 ): ReadableStream<Uint8Array> {
+  const keepReading = !!options.keepReadingAfterDisconnect && !!observer;
   let pending = first;
   /** Nothing more is read from upstream or relayed. */
   let closed = false;
@@ -90,6 +111,12 @@ export function relayRunEvents(
   /** The observer work of a `pull` still in progress, which `cancel` waits for. */
   let inflight: Promise<void> | undefined;
   let keepalive: ReturnType<typeof setInterval> | undefined;
+  /** Set in `start`, for reading on after the browser has gone. */
+  let ctrl: ReadableStreamDefaultController<Uint8Array> | undefined;
+  /** The browser has gone and the rest of the run is being read in the background. */
+  let draining = false;
+  /** The whole of a `pull` in progress, including its wait for the next event. */
+  let pulling: Promise<void> | undefined;
 
   const finish = () => {
     closed = true;
@@ -148,28 +175,64 @@ export function relayRunEvents(
         if (!closed) await fail(controller);
         return;
       }
-      if (closed) return;
+      if (closed || cancelled) return;
       controller.enqueue(frame(event.event, event.data));
     })();
     inflight = work;
     return work;
   };
 
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      keepalive = setInterval(() => {
-        if (!closed) controller.enqueue(encoder.encode(": keepalive\n\n"));
-      }, KEEPALIVE_INTERVAL_MS);
-    },
-    async pull(controller) {
-      if (closed) return;
-      if (pending) {
-        const event = pending;
-        pending = undefined;
-        await relay(controller, event);
-        return;
-      }
+  /** One `pull`: relay the buffered first event, or read and relay the next one. */
+  const pullOnce = async (controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> => {
+    if (pending) {
+      const event = pending;
+      pending = undefined;
+      await relay(controller, event);
+      return;
+    }
 
+    let next: IteratorResult<AgentRunEvent, void>;
+    try {
+      next = await events.next();
+    } catch (err) {
+      if (closed) return;
+      await relay(
+        controller,
+        { event: "error", data: { error: streamErrorMessage(err) } },
+        "connection-lost",
+      );
+      if (closed) return;
+      finish();
+      await reportClose("end");
+      end(controller);
+      return;
+    }
+    if (closed) return;
+    if (next.done) {
+      finish();
+      const ok = await reportClose("end");
+      end(controller, ok ? undefined : frame("error", { error: OBSERVER_ERROR_MESSAGE }));
+      return;
+    }
+    await relay(controller, next.value);
+  };
+
+  /**
+   * Read the rest of the run after the browser has gone, passing each event to
+   * the observer, until it ends. The SDK's `runTimeoutMs` bounds it.
+   */
+  const drain = async (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    // A pull may still be waiting for an event or inside an observer hook. Its
+    // event comes first, and only one reader may read the upstream at a time.
+    await pulling;
+    await inflight;
+    if (closed) return;
+    if (pending) {
+      const event = pending;
+      pending = undefined;
+      await relay(controller, event);
+    }
+    while (!closed) {
       let next: IteratorResult<AgentRunEvent, void>;
       try {
         next = await events.next();
@@ -183,19 +246,77 @@ export function relayRunEvents(
         if (closed) return;
         finish();
         await reportClose("end");
-        end(controller);
         return;
       }
       if (closed) return;
       if (next.done) {
         finish();
-        const ok = await reportClose("end");
-        end(controller, ok ? undefined : frame("error", { error: OBSERVER_ERROR_MESSAGE }));
+        await reportClose("end");
         return;
       }
       await relay(controller, next.value);
+    }
+  };
+
+  /**
+   * The browser has gone: stop relaying, and read on in the background. Once.
+   * From the signal, the stream itself is still open, so it is closed here:
+   * a read the server adapter is still waiting on would otherwise never settle.
+   */
+  const startDrain = (fromCancel: boolean) => {
+    if (draining || closed || !ctrl) return;
+    draining = true;
+    cancelled = true;
+    // Nobody is listening for keepalives any more.
+    clearInterval(keepalive);
+    const controller = ctrl;
+    if (!fromCancel) {
+      try {
+        controller.close();
+      } catch {
+        // Already closed or errored.
+      }
+    }
+    try {
+      observer?.onDisconnect?.();
+    } catch {
+      // Reporting only.
+    }
+    void drain(controller).catch((err) => {
+      try {
+        observer?.onError(err);
+      } catch {
+        // Nothing left to report it to.
+      }
+    });
+  };
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      ctrl = controller;
+      keepalive = setInterval(() => {
+        if (!closed && !cancelled) controller.enqueue(encoder.encode(": keepalive\n\n"));
+      }, KEEPALIVE_INTERVAL_MS);
+      if (keepReading && options.signal) {
+        const { signal } = options;
+        // A framework may drop the response unread once the request aborts,
+        // so neither pull nor cancel would run: watch the signal as well.
+        const onAbort = () => startDrain(false);
+        if (signal.aborted) queueMicrotask(onAbort);
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+    },
+    pull(controller) {
+      if (closed || draining) return;
+      const work = pullOnce(controller);
+      pulling = work;
+      return work;
     },
     async cancel() {
+      if (keepReading) {
+        startDrain(true);
+        return;
+      }
       cancelled = true;
       finish();
       stopUpstream();

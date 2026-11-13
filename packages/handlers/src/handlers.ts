@@ -49,6 +49,22 @@ export interface SeclaiHandlersOptions {
    * throws, the browser gets an `error` event instead.
    */
   onRunEnd?: RunEndCallback;
+  /**
+   * What happens to a run when the browser disconnects: closes the tab, moves
+   * to another page, or aborts the request. The run itself always carries on at
+   * Seclai and uses credits.
+   *
+   * - `false` (default): the handler stops reading it. `onRunEnd` reports
+   *   `cancelled` with what had streamed so far.
+   * - `true`: the handler keeps reading it in the background until it ends,
+   *   still calling `onEvent` for each event, so `onRunEnd` gets the real
+   *   outcome, with its output and files. Use it when `onRunEnd` saves replies.
+   *   Reading stops at `runTimeoutMs` at the latest.
+   *
+   * Only takes effect with `onEvent` or `onRunEnd` set: without them there is
+   * nothing to read the rest of the run for.
+   */
+  keepReadingAfterDisconnect?: boolean;
 }
 
 /** JSON body accepted by the `run` handler. */
@@ -128,6 +144,7 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
     agentId,
     apiVersion = DEFAULT_API_VERSION,
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
+    keepReadingAfterDisconnect = false,
     onEvent,
     onRunEnd,
   } = options;
@@ -207,7 +224,10 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
 
       const upstream = new AbortController();
       const abort = () => upstream.abort();
-      req.signal?.addEventListener("abort", abort, { once: true });
+      const keepReading = keepReadingAfterDisconnect && !!(onEvent || onRunEnd);
+      // Kept reading, the run isn't tied to the browser's request: the relay
+      // reads it to the end instead when the browser goes away.
+      if (!keepReading) req.signal?.addEventListener("abort", abort, { once: true });
 
       const events = client.runStreamingAgent(
         agentId,
@@ -225,10 +245,16 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
         const first = await events.next();
         const observer =
           onEvent || onRunEnd
-            ? createRunObserver({ onEvent, onRunEnd }, { body, request: req })
+            ? createRunObserver({ onEvent, onRunEnd }, { body, request: req }, { keepReading })
             : undefined;
         return new Response(
-          relayRunEvents(first.done ? undefined : first.value, events, abort, observer),
+          relayRunEvents(
+            first.done ? undefined : first.value,
+            events,
+            abort,
+            observer,
+            keepReading ? { keepReadingAfterDisconnect: true, signal: req.signal } : undefined,
+          ),
           { headers: SSE_HEADERS },
         );
       } catch (err) {
