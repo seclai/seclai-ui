@@ -55,6 +55,7 @@ export const ALL: APIRoute = ({ request }) => seclai.handle(request);
 | `onEvent` | None | `(event, ctx)`: called with each run event before it is relayed. See [Run callbacks](#run-callbacks) |
 | `onRunEnd` | None | `(outcome, ctx)`: called once per run with how it ended. See [Run callbacks](#run-callbacks) |
 | `keepReadingAfterDisconnect` | `false` | Keep reading a run after the browser leaves, so `onRunEnd` gets its real outcome. See [Saving replies after a disconnect](#saving-replies-after-a-disconnect) |
+| `logger` | None | `{ debug, info, warn, error }`, such as `console`: gets a line for each step of a run, upload and download. See [Logging](#logging) |
 
 ## The run stream
 
@@ -111,7 +112,7 @@ const seclai = createSeclaiHandlers({
 
 When `runTimeoutMs` runs out, the stream gets an `error` event, `Timed out waiting for the agent run to finish.`, not `timeout`. The time spent awaiting your callbacks counts against `runTimeoutMs`.
 
-If `onEvent` or `onRunEnd` throws or rejects, the handler logs the error with `console.error`, closes the upstream, and ends the stream with `event: error` carrying `{ "error": "The server could not process the run." }`, in place of the event it was handling. If `onRunEnd` hadn't been called yet, it is called once with `status: "failed"`, unless the browser had already disconnected, in which case the outcome is `cancelled` (with `keepReadingAfterDisconnect` on, it is `failed` either way). A throw during a cancel is only logged. A callback that never settles holds up the stream, and a cancel waits for a callback still running, so put a timeout on slow writes.
+If `onEvent` or `onRunEnd` throws or rejects, the handler logs the error, with `logger.error` if you set a [`logger`](#logging) and `console.error` otherwise, closes the upstream, and ends the stream with `event: error` carrying `{ "error": "The server could not process the run." }`, in place of the event it was handling. If `onRunEnd` hadn't been called yet, it is called once with `status: "failed"`, unless the browser had already disconnected, in which case the outcome is `cancelled` (with `keepReadingAfterDisconnect` on, it is `failed` either way). A throw during a cancel is only logged. A callback that never settles holds up the stream, and a cancel waits for a callback still running, so put a timeout on slow writes.
 
 ### Saving replies after a disconnect
 
@@ -135,6 +136,63 @@ const seclai = createSeclaiHandlers({
 - **Serverless platforms** may freeze or end the function when the response closes, which cuts the background reading short. Use it on long-running servers, or check your platform's background-work support, such as `waitUntil`.
 
 The option only takes effect with `onEvent` or `onRunEnd` set.
+
+## Logging
+
+Pass a `logger` to see what the handlers saw: when the stream opened, which steps ran, when the first token arrived and how the run ended. Each method is called as `(message, fields)`, with short, stable messages and the ids, timings and counts in `fields`, so `console` works, and so do winston and consola. Without a `logger`, the handlers log nothing.
+
+pino takes its arguments the other way round, `(fields, message)`, and would drop the fields, so wrap it:
+
+```ts
+const log = pino();
+const logger = {
+  debug: (m, f) => log.debug(f, m),
+  info: (m, f) => log.info(f, m),
+  warn: (m, f) => log.warn(f, m),
+  error: (m, f) => log.error(f, m),
+};
+```
+
+```ts
+import { consoleLogger, createSeclaiHandlers } from "@seclai/handlers";
+
+const seclai = createSeclaiHandlers({
+  apiKey: process.env.SECLAI_API_KEY!,
+  agentId: process.env.SECLAI_AGENT_ID!,
+  logger: console,
+  // Or drop the debug lines, and prefix each message with `[seclai]`:
+  // logger: consoleLogger("info"),
+});
+```
+
+A run with `logger: console` logs lines like these (debug lines left out, run ids shortened):
+
+```
+run starting { session_id: 'chat-42', uploads: 1, input_chars: 38 }
+stream open { session_id: 'chat-42', ms: 412 }
+run started { run_id: '3f2b8c1e-7a4d-4e9b-9c11-0d5e6f7a8b9c', session_id: 'chat-42' }
+step { run_id: '3f2b8c1e-…', session_id: 'chat-42', step: 'Describe photo', message: 'started' }
+first token { run_id: '3f2b8c1e-…', session_id: 'chat-42', ms: 2310 }
+streaming { run_id: '3f2b8c1e-…', session_id: 'chat-42', tokens: 214, chars: 905, ms: 7318 }
+run done { run_id: '3f2b8c1e-…', session_id: 'chat-42', status: 'completed', attachments: 2, tokens: 388, output_chars: 1622, ms: 11904 }
+```
+
+| Level | Lines |
+|---|---|
+| `info` | `run starting`, `stream open` (`ms` to the first event), `run started` (the `run_id` from `init`), `step` for each `step_progress` (once while the same step and message repeat), `first token`, `streaming` (every 5 seconds while tokens arrive), `run done`, `browser disconnected; the run continues on Seclai` (or, with `keepReadingAfterDisconnect`, `browser left; reading the rest of the run in the background`, and the run's end when it comes), `upload received`, `uploaded`, `download served` |
+| `warn` | `run failed` (a `done` with status `failed`), `stream ended without a result`, and a warning when a completed run streamed no tokens |
+| `error` | `run rejected` (the API refused the run up front, with `status`, `upstream_status` and the API's `error`), `stream error` (with the real `cause` when the connection failed), `run timed out`, `run failed: a callback threw`, `upload failed`, `download failed`, and callback errors from `onEvent` and `onRunEnd` |
+| `debug` | Every event, each token (its length, not its text) and each keepalive |
+
+The line for how a run ended (`run done`, `run failed`, `stream error`, `run timed out`) is logged after `onEvent` and `onRunEnd` have handled it, so it matches the outcome they reported. If one of them throws while the browser is still connected, `run failed: a callback threw` is logged in its place. After a disconnect, the line reflects the outcome `onRunEnd` received (usually `browser disconnected`).
+
+A completed run with no tokens usually means the agent's result step is `display_result` rather than `streaming_result`: the reply then arrives all at once in `done`, which looks like broken streaming.
+
+`run rejected` and the other error lines carry the upstream status and message, which matters when the browser only sees a 502 (for a bad API key, say).
+
+The lines never include the API key, the input text, or file contents. A logger that throws is ignored, so it can't break a run or an upload, and logging doesn't change what the browser receives.
+
+`consoleLogger(level?, target?)` returns a logger that writes from `level` up (`debug`, `info`, `warn`, `error` or `silent`; default `info`) to `target` (default `console`), prefixing each message with `[seclai]`. Pass your own logger as `target` to add a level threshold to it.
 
 ## Limits to know before deploying
 

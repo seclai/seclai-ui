@@ -1,4 +1,5 @@
 import type { RunRequestBody } from "./handlers";
+import type { RunLog } from "./run-log";
 import { OBSERVER_ERROR_MESSAGE, type RunEventSource, type RunStreamObserver } from "./sse";
 
 /** One event of the run stream, as the API sent it. `data` is the parsed JSON. */
@@ -56,7 +57,8 @@ interface RunSnapshot {
   attempts?: unknown;
 }
 
-function lastAttemptError(run: RunSnapshot): string | null {
+/** The error of the run's last attempt that has one. */
+export function lastAttemptError(run: RunSnapshot): string | null {
   if (!Array.isArray(run.attempts)) return null;
   for (let i = run.attempts.length - 1; i >= 0; i--) {
     const error = (run.attempts[i] as { error?: unknown } | null)?.error;
@@ -81,16 +83,19 @@ function toAttachments(raw: unknown): RunOutcomeAttachment[] {
 }
 
 /**
- * Turn the `onEvent` and `onRunEnd` options into an observer for
- * `relayRunEvents`. `onRunEnd` gets exactly one outcome: on `done`, `error` or
- * `timeout`, or when the stream ends, is cancelled or fails without one.
+ * Turn the `onEvent` and `onRunEnd` options, and the run's log, into an
+ * observer for `relayRunEvents`. `onRunEnd` gets exactly one outcome: on
+ * `done`, `error` or `timeout`, or when the stream ends, is cancelled or fails
+ * without one. Each event is logged before the callbacks see it, but how the
+ * run ended is logged after they have handled it, so the line matches the
+ * outcome they reported.
  */
 export function createRunObserver(
-  callbacks: { onEvent?: RunEventCallback; onRunEnd?: RunEndCallback },
+  callbacks: { onEvent?: RunEventCallback; onRunEnd?: RunEndCallback; log?: RunLog },
   ctx: RunCallbackContext,
   { keepReading = false }: { keepReading?: boolean } = {},
 ): RunStreamObserver {
-  const { onEvent, onRunEnd } = callbacks;
+  const { onEvent, onRunEnd, log } = callbacks;
   /**
    * Whether the browser leaving stopped the upstream. When the relay keeps
    * reading after a disconnect it doesn't, so a lost connection or a quiet end
@@ -101,6 +106,8 @@ export function createRunObserver(
   let text = "";
   /** How the run ended, once an event has said so. Not reported until its `onEvent` resolves. */
   let terminal: RunOutcome | undefined;
+  /** The event that set `terminal`, for the log. */
+  let terminalEvent: { event: RunEvent; source: RunEventSource } | undefined;
   let ended = false;
 
   const outcome = (o: Omit<RunOutcome, "runId" | "attachments"> & Partial<RunOutcome>): RunOutcome => ({
@@ -124,6 +131,11 @@ export function createRunObserver(
    * awaited, so the outcome is complete however a cancel is timed.
    */
   const record = (event: RunEvent, source: RunEventSource) => {
+    note(event, source);
+    if (terminal && !terminalEvent) terminalEvent = { event, source };
+  };
+
+  const note = (event: RunEvent, source: RunEventSource) => {
     const payload = (
       typeof event.data === "object" && event.data !== null ? event.data : {}
     ) as Record<string, unknown>;
@@ -176,31 +188,52 @@ export function createRunObserver(
 
   return {
     async onEvent(event, source) {
+      log?.event(event);
       record(event, source);
       await onEvent?.(event, ctx);
       if (terminal) await end(terminal);
+      if (terminalEvent?.event === event) log?.result(event, source);
     },
 
     onUnrelayed(event) {
+      // Logged too, so a disconnect line still carries the run id from `init`.
+      log?.event(event);
       record(event, "upstream");
     },
 
     async onClose(reason) {
-      switch (reason) {
-        case "end":
-          // See `record`: an upstream aborted by the browser can end quietly too.
-          return end(terminal ?? (browserStoppedUpstream() ? cancelled() : failed(NO_RESULT_MESSAGE)));
-        case "error":
-          return end(failed(OBSERVER_ERROR_MESSAGE));
-        case "cancel":
-          return end(terminal ?? cancelled());
+      try {
+        switch (reason) {
+          case "end":
+            // See `record`: an upstream aborted by the browser can end quietly too.
+            return await end(
+              terminal ?? (browserStoppedUpstream() ? cancelled() : failed(NO_RESULT_MESSAGE)),
+            );
+          case "error":
+            return await end(failed(OBSERVER_ERROR_MESSAGE));
+          case "cancel":
+            return await end(terminal ?? cancelled());
+        }
+      } finally {
+        // A cancel reports the terminal event's outcome even if its callbacks
+        // never finished, so its log line goes out here.
+        if (reason === "cancel" && terminalEvent) {
+          log?.result(terminalEvent.event, terminalEvent.source);
+        }
+        log?.close(reason);
       }
     },
 
     onError(err) {
       // The browser only sees a generic error, so this is the one place the
       // cause shows up.
-      console.error("@seclai/handlers: an onEvent or onRunEnd callback threw.", err);
+      if (log) log.callbackError(err);
+      else console.error("@seclai/handlers: an onEvent or onRunEnd callback threw.", err);
     },
+
+    onKeepalive: log && (() => log.keepalive()),
+    onDisconnect: log && (() => log.readingOn()),
+
+    onConnectionError: log && ((err) => log.connectionError(err)),
   };
 }

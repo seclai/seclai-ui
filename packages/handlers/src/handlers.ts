@@ -1,6 +1,8 @@
 import { Seclai, SeclaiApiVersion, type ApiVersion } from "@seclai/sdk";
-import { json, jsonError, toErrorResponse } from "./errors";
+import { errorLogFields, json, jsonError, toErrorResponse } from "./errors";
+import { safeLogger, type SeclaiLogger } from "./logger";
 import { createRunObserver, type RunEndCallback, type RunEventCallback } from "./run-callbacks";
+import { startRunLog } from "./run-log";
 import { relayRunEvents, SSE_HEADERS } from "./sse";
 
 /**
@@ -65,6 +67,12 @@ export interface SeclaiHandlersOptions {
    * nothing to read the rest of the run for.
    */
   keepReadingAfterDisconnect?: boolean;
+  /**
+   * Receives log lines about runs, uploads and downloads, with ids, timings and
+   * counts in `fields`. `console` works. Never given the API key, the input
+   * text or file contents. Without one, nothing is logged.
+   */
+  logger?: SeclaiLogger;
 }
 
 /** JSON body accepted by the `run` handler. */
@@ -148,6 +156,7 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
     onEvent,
     onRunEnd,
   } = options;
+  const logger = options.logger && safeLogger(options.logger, apiKey);
 
   // Without a key the SDK would go looking for credentials in ~/.seclai.
   if (!apiKey) throw new Error("createSeclaiHandlers: `apiKey` is required.");
@@ -192,11 +201,20 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
         return jsonError(400, "The form must include a `file` field holding a file.");
       }
 
+      const started = Date.now();
+      const fileFields = { name: file.name, type: file.type || undefined, size: file.size };
+      logger?.info("upload received", fileFields);
       try {
         const upload = await client.uploadAgentInput(agentId, {
           file,
           fileName: file.name,
           mimeType: file.type || undefined,
+        });
+        logger?.info("uploaded", {
+          ...fileFields,
+          upload_id: upload.id,
+          status: upload.status,
+          ms: Date.now() - started,
         });
         return json({
           id: upload.id,
@@ -206,7 +224,14 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
           file_size: upload.file_size,
         });
       } catch (err) {
-        return toErrorResponse(err);
+        const res = toErrorResponse(err);
+        logger?.error("upload failed", {
+          ...fileFields,
+          status: res.status,
+          ...errorLogFields(err),
+          ms: Date.now() - started,
+        });
+        return res;
       }
     },
 
@@ -229,6 +254,17 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
       // reads it to the end instead when the browser goes away.
       if (!keepReading) req.signal?.addEventListener("abort", abort, { once: true });
 
+      const log =
+        logger &&
+        startRunLog(logger, {
+          sessionId: body.sessionId,
+          uploads: body.uploadIds?.length ?? 0,
+          inputChars: body.input?.length ?? 0,
+          // Kept reading, the browser leaving doesn't stop the upstream, so a
+          // failure after it is a real one.
+          disconnected: () => !keepReading && (req.signal?.aborted ?? false),
+        });
+
       const events = client.runStreamingAgent(
         agentId,
         {
@@ -243,9 +279,10 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
         // A rejected run throws here, before any bytes are committed, so a bad
         // attachment or an empty credit balance can be a real HTTP error.
         const first = await events.next();
+        log?.opened(Boolean(first.done));
         const observer =
-          onEvent || onRunEnd
-            ? createRunObserver({ onEvent, onRunEnd }, { body, request: req }, { keepReading })
+          onEvent || onRunEnd || log
+            ? createRunObserver({ onEvent, onRunEnd, log }, { body, request: req }, { keepReading })
             : undefined;
         return new Response(
           relayRunEvents(
@@ -258,7 +295,11 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
           { headers: SSE_HEADERS },
         );
       } catch (err) {
-        return toErrorResponse(err);
+        const res = toErrorResponse(err);
+        // The browser left while the stream was connecting, which aborted it.
+        if (!keepReading && req.signal?.aborted) log?.disconnected();
+        else log?.rejected(err, res.status);
+        return res;
       }
     },
 
@@ -306,9 +347,22 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
           headers.set("content-security-policy", "sandbox; default-src 'none'");
         }
 
+        logger?.info("download served", {
+          run_id: runId,
+          attachment_id: attachmentId,
+          status: upstream.status,
+          content_type: contentType,
+        });
         return new Response(upstream.body, { status: upstream.status, headers });
       } catch (err) {
-        return toErrorResponse(err);
+        const res = toErrorResponse(err);
+        logger?.error("download failed", {
+          run_id: runId,
+          attachment_id: attachmentId,
+          status: res.status,
+          ...errorLogFields(err),
+        });
+        return res;
       }
     },
   };

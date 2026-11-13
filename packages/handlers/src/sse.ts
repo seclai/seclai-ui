@@ -60,6 +60,14 @@ export interface RunStreamObserver {
   onClose(reason: RunCloseReason): void | Promise<void>;
   /** Called with whatever `onEvent` or `onClose` threw. */
   onError(err: unknown): void;
+  /** Called each time a keepalive comment is sent. Not awaited; a throw is ignored. */
+  onKeepalive?(): void;
+  /**
+   * Called with what the upstream threw, before the `connection-lost` error
+   * event that replaces it goes to `onEvent`. That event only carries a
+   * generic message for the browser; this is the real cause. A throw is ignored.
+   */
+  onConnectionError?(err: unknown): void;
 }
 
 /** Options for {@link relayRunEvents}. */
@@ -196,6 +204,11 @@ export function relayRunEvents(
       next = await events.next();
     } catch (err) {
       if (closed) return;
+      try {
+        observer?.onConnectionError?.(err);
+      } catch {
+        // Only ever a log line.
+      }
       await relay(
         controller,
         { event: "error", data: { error: streamErrorMessage(err) } },
@@ -238,6 +251,11 @@ export function relayRunEvents(
         next = await events.next();
       } catch (err) {
         if (closed) return;
+        try {
+          observer?.onConnectionError?.(err);
+        } catch {
+          // Only ever a log line.
+        }
         await relay(
           controller,
           { event: "error", data: { error: streamErrorMessage(err) } },
@@ -295,7 +313,13 @@ export function relayRunEvents(
     start(controller) {
       ctrl = controller;
       keepalive = setInterval(() => {
-        if (!closed && !cancelled) controller.enqueue(encoder.encode(": keepalive\n\n"));
+        if (closed || cancelled) return;
+        controller.enqueue(encoder.encode(": keepalive\n\n"));
+        try {
+          observer?.onKeepalive?.();
+        } catch {
+          // Only ever a log line.
+        }
       }, KEEPALIVE_INTERVAL_MS);
       if (keepReading && options.signal) {
         const { signal } = options;

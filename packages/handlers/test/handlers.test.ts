@@ -1,11 +1,13 @@
 import { SeclaiAPIStatusError, SeclaiStreamingError, type AgentRunEvent } from "@seclai/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  consoleLogger,
   createSeclaiHandlers,
   type RunCallbackContext,
   type RunEvent,
   type RunOutcome,
   type SeclaiHandlersOptions,
+  type SeclaiLogger,
 } from "../src";
 import { createRunObserver } from "../src/run-callbacks";
 import { KEEPALIVE_INTERVAL_MS, relayRunEvents } from "../src/sse";
@@ -1296,4 +1298,663 @@ describe("handle", () => {
       expect(res.status).toBe(404);
     },
   );
+});
+
+describe("logger", () => {
+  type Level = "debug" | "info" | "warn" | "error";
+  type Line = [Level, string, Record<string, unknown> | undefined];
+
+  const API_KEY = "sk-test-0123456789abcdef";
+  const INPUT = "my very private prompt text";
+
+  /** A logger that records each call. */
+  function recorder() {
+    const lines: Line[] = [];
+    const at = (level: Level) => (message: string, fields?: Record<string, unknown>) =>
+      void lines.push([level, message, fields]);
+    const logger: SeclaiLogger = {
+      debug: at("debug"),
+      info: at("info"),
+      warn: at("warn"),
+      error: at("error"),
+    };
+    /** `level message` for each line, debug left out. */
+    const summary = () => lines.filter(([l]) => l !== "debug").map(([l, m]) => `${l} ${m}`);
+    const find = (message: string) => lines.find(([, m]) => m === message);
+    return { logger, lines, summary, find };
+  }
+
+  function withLogger(logger: SeclaiLogger, extra: Partial<SeclaiHandlersOptions> = {}) {
+    return createSeclaiHandlers({ apiKey: API_KEY, agentId: AGENT, logger, ...extra });
+  }
+
+  it("with keepReadingAfterDisconnect, logs the background reading and then the run's real end", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    client.runStreamingAgent.mockImplementation(async function* () {
+      yield { event: "init", data: { run_id: RUN } };
+      await gate;
+      yield { event: "stream_token", data: { token: "Hi" } };
+      yield { event: "done", data: { run_id: RUN, status: "completed", output: "Hi", attachments: [] } };
+    });
+    const { logger, summary } = recorder();
+    const outcomes: RunOutcome[] = [];
+    const seclai = withLogger(logger, {
+      keepReadingAfterDisconnect: true,
+      onRunEnd: (o) => void outcomes.push(o),
+    });
+    const res = await seclai.run(runRequest({ input: INPUT }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    release();
+
+    await vi.waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]!.status).toBe("completed");
+    const lines = summary();
+    expect(lines).toContain("info browser left; reading the rest of the run in the background");
+    expect(lines).not.toContain("info browser disconnected; the run continues on Seclai");
+    expect(lines.at(-1)).toBe("info run done");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const COMPLETED = (attachments: unknown[] = []) => ({
+    event: "done",
+    data: { run_id: RUN, status: "completed", output: "Hello there", attachments },
+  });
+
+  it("logs nothing without a logger", async () => {
+    const spies = (["debug", "info", "log", "warn", "error"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "Hi" } },
+        COMPLETED(),
+      ),
+    );
+    await (await handlers().run(runRequest({ input: "hi" }))).text();
+    client.runStreamingAgent.mockImplementation(async function* () {
+      throw statusError(400);
+    });
+    await handlers().run(runRequest({ input: "hi" }));
+
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("logs the run lifecycle in order, with ids and counts in fields", async () => {
+    const { logger, summary, find } = recorder();
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "step_progress", data: { step_id: "s1", step_name: "Think", message: "started" } },
+        { event: "stream_token", data: { token: "Hello " } },
+        { event: "stream_token", data: { token: "there" } },
+        { event: "stream_end", data: {} },
+        COMPLETED([{ id: "a" }, { id: "b" }]),
+      ),
+    );
+
+    const res = await withLogger(logger).run(
+      runRequest({ input: INPUT, uploadIds: ["u1", "u2"], sessionId: "sess-1" }),
+    );
+    await res.text();
+
+    expect(summary()).toEqual([
+      "info run starting",
+      "info stream open",
+      "info run started",
+      "info step",
+      "info first token",
+      "info run done",
+    ]);
+    expect(find("run starting")![2]).toEqual({ session_id: "sess-1", uploads: 2, input_chars: INPUT.length });
+    expect(find("stream open")![2]).toMatchObject({ ms: expect.any(Number) });
+    expect(find("run started")![2]).toEqual({ run_id: RUN, session_id: "sess-1" });
+    expect(find("step")![2]).toMatchObject({ run_id: RUN, step: "Think", message: "started" });
+    expect(find("first token")![2]).toMatchObject({ run_id: RUN, ms: expect.any(Number) });
+    expect(find("run done")![2]).toEqual({
+      run_id: RUN,
+      session_id: "sess-1",
+      status: "completed",
+      attachments: 2,
+      tokens: 2,
+      output_chars: "Hello there".length,
+      ms: expect.any(Number),
+    });
+  });
+
+  it("logs every event, token and keepalive at debug", async () => {
+    vi.useFakeTimers();
+    const { logger, lines } = recorder();
+    let release!: () => void;
+    client.runStreamingAgent.mockImplementation(async function* () {
+      yield { event: "init", data: { run_id: RUN } };
+      yield { event: "stream_token", data: { token: "Hi" } };
+      await new Promise<void>((r) => (release = r));
+      yield COMPLETED();
+    });
+    const res = await withLogger(logger).run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.read();
+    const next = reader.read();
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
+    expect(new TextDecoder().decode((await next).value)).toBe(": keepalive\n\n");
+    release();
+    while (!(await reader.read()).done);
+
+    const debug = lines.filter(([l]) => l === "debug").map(([, m, f]) => `${m} ${f?.event ?? ""}`.trim());
+    expect(debug).toEqual(["event init", "token", "keepalive", "event done", "stream closed"]);
+    expect(lines.find(([, m]) => m === "token")![2]).toMatchObject({ n: 1, chars: 2 });
+  });
+
+  it("logs a step once while it repeats", async () => {
+    const { logger, lines } = recorder();
+    const step = (name: string, message: string) => ({
+      event: "step_progress",
+      data: { step_id: name, step_name: name, message },
+    });
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf(
+        step("Search", "running"),
+        step("Search", "running"),
+        step("Search", "done"),
+        step("Write", "running"),
+        step("Write", "running"),
+        step("Search", "running"),
+        COMPLETED(),
+      ),
+    );
+    await (await withLogger(logger).run(runRequest({ input: "hi" }))).text();
+
+    const steps = lines.filter(([, m]) => m === "step").map(([, , f]) => `${f!.step}: ${f!.message}`);
+    expect(steps).toEqual(["Search: running", "Search: done", "Write: running", "Search: running"]);
+  });
+
+  it("logs the first token's latency, then a progress line at most every 5 seconds", async () => {
+    vi.useFakeTimers();
+    const { logger, lines } = recorder();
+    const gates: (() => void)[] = [];
+    const token = (t: string) => ({ event: "stream_token", data: { token: t } });
+    client.runStreamingAgent.mockImplementation(async function* () {
+      yield { event: "init", data: { run_id: RUN } };
+      for (const t of ["ab", "cd", "ef", "gh", "ij"]) {
+        await new Promise<void>((r) => gates.push(r));
+        yield token(t);
+      }
+      yield COMPLETED();
+    });
+    const res = await withLogger(logger).run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+
+    /** Wait `ms`, then let the next token through. */
+    const tokenAfter = async (ms: number) => {
+      await vi.advanceTimersByTimeAsync(ms);
+      const read = reader.read();
+      await vi.advanceTimersByTimeAsync(0);
+      gates.shift()!();
+      await read;
+    };
+    await tokenAfter(1_200); // first token
+    await tokenAfter(2_000); // 2s after: too soon
+    await tokenAfter(3_000); // 5s after the first: progress
+    await tokenAfter(1_000); // too soon
+    await tokenAfter(5_000); // progress
+    while (!(await reader.read()).done);
+
+    const info = lines.filter(([l, m]) => l === "info" && /token|streaming/.test(m));
+    expect(info.map(([, m, f]) => [m, f!.ms, f!.tokens, f!.chars])).toEqual([
+      ["first token", 1_200, undefined, undefined],
+      ["streaming", 6_200, 3, 6],
+      ["streaming", 12_200, 5, 10],
+    ]);
+  });
+
+  it("warns when a completed run streamed no tokens", async () => {
+    const { logger, summary, find } = recorder();
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf({ event: "init", data: { run_id: RUN } }, COMPLETED()),
+    );
+    await (await withLogger(logger).run(runRequest({ input: "hi" }))).text();
+
+    expect(summary().slice(-2)).toEqual(["info run done", expect.stringMatching(/^warn /)]);
+    const [, message] = summary().slice(-1)[0]!.split(/^warn /);
+    expect(message).toMatch(/display_result/);
+    expect(message).toMatch(/streaming_result/);
+    expect(find("run done")![2]).toMatchObject({ tokens: 0, output_chars: 11 });
+  });
+
+  it("warns about a failed run, with the last attempt's error", async () => {
+    const { logger, summary, find } = recorder();
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "done", data: { run_id: RUN, status: "failed", attempts: [{ error: "Blocked" }] } },
+      ),
+    );
+    await (await withLogger(logger).run(runRequest({ input: "hi" }))).text();
+
+    expect(summary()).toEqual([
+      "info run starting",
+      "info stream open",
+      "info run started",
+      "warn run failed",
+    ]);
+    expect(find("run failed")![2]).toMatchObject({ run_id: RUN, status: "failed", error: "Blocked" });
+  });
+
+  it("warns when the stream ends without a result", async () => {
+    const { logger, summary } = recorder();
+    client.runStreamingAgent.mockReturnValue(eventsOf({ event: "init", data: { run_id: RUN } }));
+    await (await withLogger(logger).run(runRequest({ input: "hi" }))).text();
+    expect(summary().at(-1)).toBe("warn stream ended without a result");
+  });
+
+  it("logs stream errors and timeouts at error", async () => {
+    const { logger, summary, find } = recorder();
+    client.runStreamingAgent.mockImplementation(async function* () {
+      yield { event: "init", data: { run_id: RUN } };
+      throw new SeclaiStreamingError("Timed out");
+    });
+    await (await withLogger(logger).run(runRequest({ input: "hi" }))).text();
+    expect(summary().at(-1)).toBe("error stream error");
+    expect(find("stream error")![2]).toMatchObject({
+      run_id: RUN,
+      error: "Timed out waiting for the agent run to finish.",
+    });
+
+    const second = recorder();
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf({ event: "init", data: { run_id: RUN } }, { event: "timeout", data: {} }),
+    );
+    await (await withLogger(second.logger).run(runRequest({ input: "hi" }))).text();
+    expect(second.summary().at(-1)).toBe("error run timed out");
+  });
+
+  it("logs an up-front rejection with the status and the API's message", async () => {
+    const { logger, summary, find } = recorder();
+    client.runStreamingAgent.mockImplementation(async function* () {
+      throw statusError(402, JSON.stringify({ detail: "Out of credits" }));
+    });
+    const res = await withLogger(logger).run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(402);
+    expect(summary()).toEqual(["info run starting", "error run rejected"]);
+    expect(find("run rejected")![2]).toMatchObject({
+      status: 402,
+      upstream_status: 402,
+      error: "Out of credits",
+    });
+  });
+
+  it("logs the cause a 502 hides from the browser", async () => {
+    const { logger, find } = recorder();
+    client.runStreamingAgent.mockImplementation(async function* () {
+      throw statusError(401, JSON.stringify({ detail: "Invalid API key" }));
+    });
+    const res = await withLogger(logger).run(runRequest({ input: "hi" }));
+    expect(res.status).toBe(502);
+    expect(find("run rejected")![2]).toMatchObject({ status: 502, upstream_status: 401, error: "Invalid API key" });
+  });
+
+  it("logs that the browser left and the run continues", async () => {
+    const { logger, summary, find } = recorder();
+    client.runStreamingAgent.mockImplementation(async function* (
+      _agentId: string,
+      _body: unknown,
+      opts: { signal: AbortSignal },
+    ) {
+      yield { event: "init", data: { run_id: RUN } };
+      yield { event: "stream_token", data: { token: "par" } };
+      await new Promise((_resolve, reject) => {
+        opts.signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    });
+    const res = await withLogger(logger).run(runRequest({ input: "hi" }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.read();
+    await reader.cancel();
+
+    expect(summary().at(-1)).toBe("info browser disconnected; the run continues on Seclai");
+    expect(find("browser disconnected; the run continues on Seclai")![2]).toMatchObject({
+      run_id: RUN,
+      tokens: 1,
+    });
+    expect(summary().filter((l) => l.startsWith("warn") || l.startsWith("error"))).toEqual([]);
+  });
+
+  it("logs a disconnect, not a stream error, when the request's signal aborts first", async () => {
+    const { logger, summary } = recorder();
+    client.runStreamingAgent.mockImplementation(async function* (
+      _agentId: string,
+      _body: unknown,
+      opts: { signal: AbortSignal },
+    ) {
+      yield { event: "init", data: { run_id: RUN } };
+      await new Promise((_resolve, reject) => {
+        if (opts.signal.aborted) reject(new Error("aborted"));
+        opts.signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    });
+    const browser = new AbortController();
+    const res = await withLogger(logger).run(runRequest({ input: "hi" }, { signal: browser.signal }));
+    const reader = res.body!.getReader();
+    await reader.read();
+    const pending = reader.read();
+    browser.abort();
+    await pending;
+    await reader.cancel();
+
+    expect(summary().slice(-1)).toEqual(["info browser disconnected; the run continues on Seclai"]);
+    expect(summary().filter((l) => l.includes("browser disconnected"))).toHaveLength(1);
+    expect(summary().filter((l) => l.startsWith("error"))).toEqual([]);
+  });
+
+  describe("uploads and downloads", () => {
+    const upload = (logger: SeclaiLogger) => {
+      const form = new FormData();
+      form.set("file", new File(["file-contents-xyz"], "a.txt", { type: "text/plain" }));
+      return withLogger(logger).upload(
+        new Request(`${URL_BASE}/upload`, { method: "POST", body: form }),
+      );
+    };
+
+    it("logs an upload received and uploaded, without its contents", async () => {
+      const { logger, lines } = recorder();
+      client.uploadAgentInput.mockResolvedValue({ id: "up-1", status: "ready", filename: "a.txt" });
+
+      expect((await upload(logger)).status).toBe(200);
+
+      expect(lines.map(([l, m]) => `${l} ${m}`)).toEqual(["info upload received", "info uploaded"]);
+      expect(lines[0]![2]).toEqual({ name: "a.txt", type: expect.stringMatching(/^text\/plain/), size: 17 });
+      expect(lines[1]![2]).toMatchObject({ name: "a.txt", size: 17, upload_id: "up-1", ms: expect.any(Number) });
+      expect(JSON.stringify(lines)).not.toContain("file-contents");
+    });
+
+    it("logs a failed upload", async () => {
+      const { logger, lines } = recorder();
+      client.uploadAgentInput.mockRejectedValue(statusError(413, JSON.stringify({ detail: "Too big" })));
+
+      expect((await upload(logger)).status).toBe(413);
+      expect(lines.at(-1)).toEqual([
+        "error",
+        "upload failed",
+        expect.objectContaining({ name: "a.txt", status: 413, upstream_status: 413, error: "Too big" }),
+      ]);
+    });
+
+    const download = (logger: SeclaiLogger) =>
+      withLogger(logger).download(
+        new Request(`${URL_BASE}/download?${new URLSearchParams({ runId: RUN, attachmentId: "att-1" })}`),
+      );
+
+    it("logs a download served", async () => {
+      const { logger, lines } = recorder();
+      client.downloadAgentRunAttachment.mockResolvedValue(
+        new Response("bytes", { headers: { "content-type": "image/png" } }),
+      );
+      await download(logger);
+      expect(lines).toEqual([
+        [
+          "info",
+          "download served",
+          { run_id: RUN, attachment_id: "att-1", status: 200, content_type: "image/png" },
+        ],
+      ]);
+    });
+
+    it("logs a failed download", async () => {
+      const { logger, lines } = recorder();
+      client.downloadAgentRunAttachment.mockRejectedValue(statusError(404));
+      await download(logger);
+      expect(lines).toEqual([
+        [
+          "error",
+          "download failed",
+          expect.objectContaining({ run_id: RUN, attachment_id: "att-1", status: 404, upstream_status: 404 }),
+        ],
+      ]);
+    });
+  });
+
+  it("never logs the input text or the API key", async () => {
+    const { logger, lines } = recorder();
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "x" } },
+        COMPLETED(),
+      ),
+    );
+    await (await withLogger(logger).run(runRequest({ input: INPUT, sessionId: "s" }))).text();
+    // An error message that happens to carry the key.
+    client.runStreamingAgent.mockImplementation(async function* () {
+      throw new Error(`connect failed for ${API_KEY}`);
+    });
+    await withLogger(logger).run(runRequest({ input: INPUT }));
+    client.downloadAgentRunAttachment.mockRejectedValue(new Error(`bad key ${API_KEY}`));
+    await withLogger(logger).download(
+      new Request(`${URL_BASE}/download?${new URLSearchParams({ runId: RUN, attachmentId: "a" })}`),
+    );
+
+    expect(lines.length).toBeGreaterThan(8);
+    const logged = JSON.stringify(lines);
+    expect(logged).not.toContain(INPUT);
+    expect(logged).not.toContain(API_KEY);
+    expect(logged).toContain("[redacted]");
+  });
+
+  it("keeps the run and the upload working when the logger throws", async () => {
+    const broken: SeclaiLogger = {
+      debug: () => {
+        throw new Error("debug");
+      },
+      info: () => {
+        throw new Error("info");
+      },
+      warn: () => {
+        throw new Error("warn");
+      },
+      error: () => {
+        throw new Error("error");
+      },
+    };
+    const outcomes: RunOutcome[] = [];
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "Hi" } },
+        COMPLETED(),
+      ),
+    );
+    const res = await withLogger(broken, { onRunEnd: (o) => void outcomes.push(o) }).run(
+      runRequest({ input: "hi" }),
+    );
+    expect(await res.text()).toBe(
+      [
+        `event: init\ndata: {"run_id":"${RUN}"}\n\n`,
+        `event: stream_token\ndata: {"token":"Hi"}\n\n`,
+        `event: done\ndata: ${JSON.stringify(COMPLETED().data)}\n\n`,
+      ].join(""),
+    );
+    expect(outcomes.map((o) => o.status)).toEqual(["completed"]);
+
+    client.uploadAgentInput.mockResolvedValue({ id: "up-1", status: "ready" });
+    const form = new FormData();
+    form.set("file", new File(["x"], "a.txt"));
+    const up = await withLogger(broken).upload(
+      new Request(`${URL_BASE}/upload`, { method: "POST", body: form }),
+    );
+    expect(up.status).toBe(200);
+
+    client.runStreamingAgent.mockImplementation(async function* () {
+      throw statusError(400);
+    });
+    expect((await withLogger(broken).run(runRequest({ input: "hi" }))).status).toBe(400);
+  });
+
+  it("relays the same bytes with or without a logger", async () => {
+    const events = () =>
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "step_progress", data: { step_name: "n" } },
+        { event: "stream_token", data: { token: "Hi" } },
+        COMPLETED([{ id: "a" }]),
+      );
+    client.runStreamingAgent.mockReturnValue(events());
+    const plain = await (await handlers().run(runRequest({ input: "hi" }))).text();
+    client.runStreamingAgent.mockReturnValue(events());
+    const logged = await (await withLogger(recorder().logger).run(runRequest({ input: "hi" }))).text();
+    expect(logged).toBe(plain);
+  });
+
+  it("sends callback errors to logger.error instead of console.error", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { logger, lines } = recorder();
+    client.runStreamingAgent.mockReturnValue(eventsOf({ event: "init", data: { run_id: RUN } }, COMPLETED()));
+    const res = await withLogger(logger, {
+      onRunEnd: () => {
+        throw new Error("db down");
+      },
+    }).run(runRequest({ input: "hi" }));
+
+    expect(await res.text()).toContain("event: error");
+    expect(consoleError).not.toHaveBeenCalled();
+    const errors = lines.filter(([l]) => l === "error");
+    expect(errors).toEqual([
+      ["error", "an onEvent or onRunEnd callback threw", expect.objectContaining({ run_id: RUN, error: new Error("db down") })],
+      ["error", "run failed: a callback threw", expect.objectContaining({ run_id: RUN, status: "failed" })],
+    ]);
+  });
+
+  it.each(["onEvent", "onRunEnd"] as const)(
+    "logs a run whose %s threw on `done` as failed, not done, after the callbacks ran",
+    async (name) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { logger, lines, summary } = recorder();
+      const order: string[] = [];
+      const outcomes: RunOutcome[] = [];
+      client.runStreamingAgent.mockReturnValue(eventsOf({ event: "init", data: { run_id: RUN } }, COMPLETED()));
+      const res = await withLogger(logger, {
+        onEvent: (e) => {
+          if (e.event !== "done") return;
+          order.push("onEvent done");
+          if (name === "onEvent") throw new Error("db down");
+        },
+        onRunEnd: (o) => {
+          order.push("onRunEnd");
+          outcomes.push(o);
+          if (name === "onRunEnd") throw new Error("db down");
+        },
+      }).run(runRequest({ input: "hi" }));
+
+      const names = [...(await res.text()).matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+      expect(names).toEqual(["init", "error"]);
+      expect(summary()).not.toContain("info run done");
+      expect(summary().at(-1)).toBe("error run failed: a callback threw");
+      expect(lines.at(-1)![2]).toMatchObject({ run_id: RUN, status: "failed" });
+      // The browser gets an error event, and so does onRunEnd unless it was the one that threw.
+      expect(outcomes.map((o) => o.status)).toEqual(name === "onEvent" ? ["failed"] : ["completed"]);
+      expect(order.indexOf("onEvent done")).toBeLessThan(order.indexOf("onRunEnd"));
+    },
+  );
+
+  it("logs `run done` only after onRunEnd has resolved", async () => {
+    const { logger } = recorder();
+    const order: string[] = [];
+    logger.info = (message) => void order.push(`log ${message}`);
+    client.runStreamingAgent.mockReturnValue(eventsOf({ event: "init", data: { run_id: RUN } }, COMPLETED()));
+    const res = await withLogger(logger, {
+      onRunEnd: async (o) => {
+        await Promise.resolve();
+        order.push(`onRunEnd ${o.status}`);
+      },
+    }).run(runRequest({ input: "hi" }));
+    await res.text();
+    expect(order.slice(-2)).toEqual(["onRunEnd completed", "log run done"]);
+  });
+
+  it("logs the upstream's real error on a mid-stream failure, without sending it to the browser", async () => {
+    const { logger, find } = recorder();
+    client.runStreamingAgent.mockImplementation(async function* () {
+      yield { event: "init", data: { run_id: RUN } };
+      throw new Error(`socket hang up calling https://api.test?key=${API_KEY}`);
+    });
+    const res = await withLogger(logger).run(runRequest({ input: "hi" }));
+    const body = await res.text();
+
+    expect(body).toContain('"error":"The connection to the Seclai API was lost."');
+    expect(body).not.toContain("socket hang up");
+    expect(body).not.toContain(API_KEY);
+    const fields = find("stream error")![2]!;
+    expect(fields).toMatchObject({
+      run_id: RUN,
+      error: "The connection to the Seclai API was lost.",
+      cause: "socket hang up calling https://api.test?key=[redacted]",
+    });
+    expect(JSON.stringify(fields)).not.toContain(API_KEY);
+  });
+
+  it("logs a disconnect, not a rejection, when the browser leaves while the stream connects", async () => {
+    const { logger, summary } = recorder();
+    const browser = new AbortController();
+    client.runStreamingAgent.mockImplementation(async function* (
+      _agentId: string,
+      _body: unknown,
+      opts: { signal: AbortSignal },
+    ) {
+      await new Promise((_resolve, reject) => {
+        opts.signal.addEventListener("abort", () => reject(new Error("This operation was aborted")));
+      });
+    });
+    const running = withLogger(logger).run(runRequest({ input: "hi" }, { signal: browser.signal }));
+    await new Promise((r) => setTimeout(r, 0));
+    browser.abort();
+    await running;
+
+    expect(summary()).toEqual([
+      "info run starting",
+      "info browser disconnected; the run continues on Seclai",
+    ]);
+  });
+});
+
+describe("consoleLogger", () => {
+  it("writes from the given level up, prefixed, to the target", () => {
+    const target = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const log = consoleLogger("warn", target);
+    log.debug("d");
+    log.info("i", { a: 1 });
+    log.warn("w", { a: 1 });
+    log.error("e");
+    expect(target.debug).not.toHaveBeenCalled();
+    expect(target.info).not.toHaveBeenCalled();
+    expect(target.warn).toHaveBeenCalledWith("[seclai] w", { a: 1 });
+    expect(target.error).toHaveBeenCalledWith("[seclai] e");
+  });
+
+  it("defaults to info and console", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    consoleLogger().debug("d");
+    consoleLogger().info("i");
+    expect(debug).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith("[seclai] i");
+    vi.restoreAllMocks();
+  });
+
+  it("writes nothing when silent", () => {
+    const target = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const log = consoleLogger("silent", target);
+    log.error("e");
+    expect(target.error).not.toHaveBeenCalled();
+  });
 });
