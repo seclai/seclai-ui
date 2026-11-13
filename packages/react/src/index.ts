@@ -7,7 +7,14 @@ export {
   type StartRunOptions,
   type UseAgentRunResult,
 } from "./useAgentRun";
-export { DEFAULT_BASE_PATH } from "./endpoints";
+export {
+  DEFAULT_BASE_PATH,
+  createEndpoints,
+  fetchAttachmentReferences,
+  uploadFile,
+  type AgentEndpoints,
+  type EndpointRequestOptions,
+} from "./endpoints";
 export type {
   AcceptedAttachmentSlot,
   AgentAttachment,

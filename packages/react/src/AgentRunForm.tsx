@@ -42,7 +42,7 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
     const controller = new AbortController();
     setSlots(null);
     setLoadError(null);
-    fetchAttachmentReferences(endpoints, controller.signal)
+    fetchAttachmentReferences(endpoints, { signal: controller.signal })
       .then((refs) => setSlots(refs.accepted_attachments ?? []))
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
