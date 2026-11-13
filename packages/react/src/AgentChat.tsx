@@ -1,6 +1,6 @@
 import { useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { MarkdownContent } from "./placeholders/MarkdownContent";
-import { MediaPreview } from "./placeholders/MediaPreview";
+import { MediaGallery } from "./media/MediaGallery";
 import type { AgentAttachment, AgentEndpointOptions } from "./types";
 import { useAgentRun } from "./useAgentRun";
 
@@ -30,9 +30,9 @@ function Turn({ turn }: { turn: ChatTurn }) {
   return (
     <li className={`seclai-turn seclai-turn-${turn.role}`}>
       {turn.text && <MarkdownContent content={turn.text} />}
-      {turn.attachments?.map((attachment) => (
-        <MediaPreview key={attachment.id} attachment={attachment} />
-      ))}
+      {turn.attachments && turn.attachments.length > 0 && (
+        <MediaGallery attachments={turn.attachments} />
+      )}
       {turn.error && (
         <p className="seclai-error" role="alert">
           {turn.error}

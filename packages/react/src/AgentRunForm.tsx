@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { createEndpoints, fetchAttachmentReferences, uploadFile } from "./endpoints";
 import { MarkdownContent } from "./placeholders/MarkdownContent";
-import { MediaPreview } from "./placeholders/MediaPreview";
+import { MediaGallery } from "./media/MediaGallery";
 import type { AcceptedAttachmentSlot, AgentEndpointOptions } from "./types";
 import { useAgentRun, type AgentRunState } from "./useAgentRun";
 
@@ -172,9 +172,7 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
       {(run.text || run.attachments.length > 0) && (
         <div className="seclai-output" aria-live="polite" aria-busy={run.status === "running"}>
           {run.text && <MarkdownContent content={run.text} />}
-          {run.attachments.map((attachment) => (
-            <MediaPreview key={attachment.id} attachment={attachment} />
-          ))}
+          {run.attachments.length > 0 && <MediaGallery attachments={run.attachments} />}
         </div>
       )}
     </div>
