@@ -9,3 +9,12 @@ export type {
   SeclaiHandlers,
   SeclaiHandlersOptions,
 } from "./handlers";
+export type {
+  RunCallbackContext,
+  RunEndCallback,
+  RunEvent,
+  RunEventCallback,
+  RunOutcome,
+  RunOutcomeAttachment,
+  RunOutcomeStatus,
+} from "./run-callbacks";

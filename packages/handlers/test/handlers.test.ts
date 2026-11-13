@@ -1,7 +1,14 @@
 import { SeclaiAPIStatusError, SeclaiStreamingError, type AgentRunEvent } from "@seclai/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSeclaiHandlers } from "../src";
-import { KEEPALIVE_INTERVAL_MS } from "../src/sse";
+import {
+  createSeclaiHandlers,
+  type RunCallbackContext,
+  type RunEvent,
+  type RunOutcome,
+  type SeclaiHandlersOptions,
+} from "../src";
+import { createRunObserver } from "../src/run-callbacks";
+import { KEEPALIVE_INTERVAL_MS, relayRunEvents } from "../src/sse";
 
 const client = vi.hoisted(() => ({
   getAgentAttachmentReferences: vi.fn(),
@@ -366,6 +373,516 @@ describe("run", () => {
 
       await reader.cancel();
       expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+});
+
+describe("run callbacks", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const DONE = {
+    event: "done",
+    data: {
+      run_id: RUN,
+      status: "completed",
+      output: "Hello there",
+      attachments: [
+        { id: "att-1", name: "a.png", mime: "image/png", bytes: 3, download_url: "x" },
+        { id: "att-2", mime: 7 },
+        { nope: true },
+      ],
+    },
+  };
+
+  function withCallbacks(callbacks: Pick<SeclaiHandlersOptions, "onEvent" | "onRunEnd">) {
+    return createSeclaiHandlers({ apiKey: "k", agentId: AGENT, ...callbacks });
+  }
+
+  /** Run with an `onRunEnd` that records each outcome. */
+  async function runRecording(
+    events: (
+      agentId: string,
+      body: unknown,
+      opts: { signal: AbortSignal },
+    ) => AsyncGenerator<AgentRunEvent, void, undefined>,
+    extra: Pick<SeclaiHandlersOptions, "onEvent"> = {},
+  ) {
+    const outcomes: RunOutcome[] = [];
+    client.runStreamingAgent.mockImplementation(events);
+    const res = await withCallbacks({ ...extra, onRunEnd: (o) => void outcomes.push(o) }).run(
+      runRequest({ input: "hi" }),
+    );
+    return { res, outcomes };
+  }
+
+  /** The event names in an SSE body, in order. */
+  const eventNames = (text: string) => [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  /** Whether `promise` settles within a few macrotasks. */
+  async function settles(promise: Promise<unknown>) {
+    let settled = false;
+    void promise.then(() => (settled = true));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    return settled;
+  }
+
+  /** Yields `init`, then waits for its signal to abort. */
+  function hanging() {
+    return async function* (_agentId: string, _body: unknown, opts: { signal: AbortSignal }) {
+      yield { event: "init", data: { run_id: RUN } };
+      yield { event: "stream_token", data: { token: "par" } };
+      yield { event: "stream_token", data: { token: "tial" } };
+      await new Promise((_resolve, reject) => {
+        if (opts.signal.aborted) reject(new Error("aborted"));
+        opts.signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    };
+  }
+
+  it("calls onEvent for each event in order, with the request and its body", async () => {
+    const seen: [RunEvent, RunCallbackContext][] = [];
+    client.runStreamingAgent.mockReturnValue(
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "Hi" } },
+        DONE,
+      ),
+    );
+    const req = runRequest({ input: "hi", sessionId: "s1" });
+
+    const res = await withCallbacks({ onEvent: (e, ctx) => void seen.push([e, ctx]) }).run(req);
+    await res.text();
+
+    expect(seen.map(([e]) => e.event)).toEqual(["init", "stream_token", "done"]);
+    expect(seen[1]![0]).toEqual({ event: "stream_token", data: { token: "Hi" } });
+    expect(seen[0]![1]).toEqual({ body: { input: "hi", sessionId: "s1" }, request: req });
+  });
+
+  it("relays an event only once onEvent has resolved for it", async () => {
+    const gate = deferred();
+    client.runStreamingAgent.mockReturnValue(eventsOf({ event: "init", data: { run_id: RUN } }, DONE));
+    const res = await withCallbacks({
+      onEvent: (e) => (e.event === "init" ? gate.promise : undefined),
+    }).run(runRequest({ input: "hi" }));
+
+    const read = res.body!.getReader().read();
+    expect(await settles(read)).toBe(false);
+    gate.resolve();
+    expect(new TextDecoder().decode((await read).value)).toContain("event: init");
+  });
+
+  it("reports a completed run once, with its output and normalized attachments", async () => {
+    const { res, outcomes } = await runRecording(() =>
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "Hello " } },
+        DONE,
+      ),
+    );
+
+    expect(eventNames(await res.text())).toEqual(["init", "stream_token", "done"]);
+    expect(outcomes).toEqual([
+      {
+        runId: RUN,
+        status: "completed",
+        output: "Hello there",
+        attachments: [
+          { id: "att-1", name: "a.png", mime: "image/png" },
+          { id: "att-2", name: null, mime: "application/octet-stream" },
+        ],
+        error: null,
+      },
+    ]);
+  });
+
+  it("falls back to the streamed text when `done` has no output", async () => {
+    const { res, outcomes } = await runRecording(() =>
+      eventsOf(
+        { event: "stream_token", data: { token: "streamed" } },
+        { event: "done", data: { run_id: RUN, status: "completed", output: "" } },
+      ),
+    );
+    await res.text();
+    // No `init`, so the run id comes from `done`.
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "completed", output: "streamed", attachments: [], error: null },
+    ]);
+  });
+
+  it("reports a failed run with the last attempt's error and the streamed text", async () => {
+    const { res, outcomes } = await runRecording(() =>
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "so far" } },
+        {
+          event: "done",
+          data: {
+            status: "failed",
+            output: "invalid",
+            attempts: [{ error: "first" }, { error: "Blocked by policy" }, { error: null }],
+          },
+        },
+      ),
+    );
+    expect(eventNames(await res.text())).toEqual(["init", "stream_token", "done"]);
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "failed", output: "so far", attachments: [], error: "Blocked by policy" },
+    ]);
+  });
+
+  it("reports an error event once, even when the stream then ends", async () => {
+    const { res, outcomes } = await runRecording(() =>
+      eventsOf(
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "partial" } },
+        { event: "error", data: { error: "Model unavailable" } },
+      ),
+    );
+    expect(eventNames(await res.text())).toEqual(["init", "stream_token", "error"]);
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "failed", output: "partial", attachments: [], error: "Model unavailable" },
+    ]);
+  });
+
+  it("reports a timeout event as a failure", async () => {
+    const { res, outcomes } = await runRecording(() =>
+      eventsOf({ event: "init", data: { run_id: RUN } }, { event: "timeout", data: {} }),
+    );
+    expect(eventNames(await res.text())).toEqual(["init", "timeout"]);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ runId: RUN, status: "failed", error: expect.stringMatching(/waiting/) });
+  });
+
+  it("reports an upstream failure, and passes its error frame to onEvent", async () => {
+    const onEvent = vi.fn();
+    const { res, outcomes } = await runRecording(
+      async function* () {
+        yield { event: "init", data: { run_id: RUN } };
+        throw new SeclaiStreamingError("Timed out");
+      },
+      { onEvent },
+    );
+
+    expect(eventNames(await res.text())).toEqual(["init", "error"]);
+    expect(onEvent.mock.calls.map(([e]) => e.event)).toEqual(["init", "error"]);
+    expect(outcomes).toEqual([
+      {
+        runId: RUN,
+        status: "failed",
+        output: "",
+        attachments: [],
+        error: "Timed out waiting for the agent run to finish.",
+      },
+    ]);
+  });
+
+  it("reports a failure when the stream ends without a result", async () => {
+    const { res, outcomes } = await runRecording(() =>
+      eventsOf({ event: "init", data: { run_id: RUN } }, { event: "stream_token", data: { token: "x" } }),
+    );
+    expect(eventNames(await res.text())).toEqual(["init", "stream_token"]);
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "failed", output: "x", attachments: [], error: "The stream ended without a result." },
+    ]);
+  });
+
+  it("reports a failure when the upstream sends nothing", async () => {
+    const { res, outcomes } = await runRecording(() => eventsOf());
+    expect(await res.text()).toBe("");
+    expect(outcomes).toEqual([
+      { runId: null, status: "failed", output: "", attachments: [], error: "The stream ended without a result." },
+    ]);
+  });
+
+  it("reports `cancelled` once when the browser cancels, and still closes the upstream", async () => {
+    const { res, outcomes } = await runRecording(hanging());
+    const { signal } = client.runStreamingAgent.mock.calls[0]![2];
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.read();
+    await reader.read();
+
+    await reader.cancel();
+
+    expect(signal.aborted).toBe(true);
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "cancelled", output: "partial", attachments: [], error: null },
+    ]);
+  });
+
+  it("reports `cancelled` when the request's signal aborts the upstream first", async () => {
+    const browser = new AbortController();
+    const outcomes: RunOutcome[] = [];
+    client.runStreamingAgent.mockImplementation(hanging());
+    const res = await withCallbacks({ onRunEnd: (o) => void outcomes.push(o) }).run(
+      runRequest({ input: "hi" }, { signal: browser.signal }),
+    );
+    const reader = res.body!.getReader();
+    for (let i = 0; i < 3; i++) await reader.read();
+
+    const pending = reader.read();
+    browser.abort();
+    expect(new TextDecoder().decode((await pending).value)).toContain("event: error");
+    await reader.cancel();
+
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "cancelled", output: "partial", attachments: [], error: null },
+    ]);
+  });
+
+  it("does not report again when the browser cancels after the run ended", async () => {
+    const { res, outcomes } = await runRecording(async function* () {
+      yield DONE;
+      await new Promise(() => {});
+    });
+    const reader = res.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: done");
+    await reader.cancel();
+    expect(outcomes.map((o) => o.status)).toEqual(["completed"]);
+  });
+
+  it("reports a cancel only once an onEvent still running has resolved, with its token", async () => {
+    const gate = deferred();
+    const entered = deferred();
+    const order: string[] = [];
+    const { res, outcomes } = await runRecording(hanging(), {
+      onEvent: async (e) => {
+        if (e.event !== "stream_token") return;
+        entered.resolve();
+        await gate.promise;
+        order.push(`onEvent ${(e.data as { token: string }).token}`);
+      },
+    });
+    const reader = res.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: init");
+    void reader.read().catch(() => {});
+    await entered.promise;
+
+    const cancel = reader.cancel().then(() => order.push("cancel resolved"));
+    expect(await settles(cancel)).toBe(false);
+    expect(outcomes).toEqual([]);
+
+    gate.resolve();
+    await cancel;
+    expect(order).toEqual(["onEvent par", "cancel resolved"]);
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "cancelled", output: "par", attachments: [], error: null },
+    ]);
+  });
+
+  it("keeps the run id of an `init` whose onEvent was still running at cancel", async () => {
+    const gate = deferred();
+    let onEventDone = false;
+    const outcomes: [RunOutcome, boolean][] = [];
+    client.runStreamingAgent.mockImplementation(hanging());
+    const res = await withCallbacks({
+      onEvent: async () => {
+        await gate.promise;
+        onEventDone = true;
+      },
+      onRunEnd: (o) => void outcomes.push([o, onEventDone]),
+    }).run(runRequest({ input: "hi" }));
+    const { signal } = client.runStreamingAgent.mock.calls[0]![2];
+
+    const cancel = res.body!.cancel();
+    expect(await settles(cancel)).toBe(false);
+    expect(signal.aborted).toBe(true);
+    gate.resolve();
+    await cancel;
+
+    // onRunEnd ran after onEvent had resolved.
+    expect(outcomes).toEqual([
+      [{ runId: RUN, status: "cancelled", output: "", attachments: [], error: null }, true],
+    ]);
+  });
+
+  it("takes the run id from an `init` that was never relayed when cancelled before the first pull", async () => {
+    const outcomes: RunOutcome[] = [];
+    const onEvent = vi.fn();
+    const abort = vi.fn();
+    const stream = relayRunEvents(
+      { event: "init", data: { run_id: RUN } },
+      eventsOf(),
+      abort,
+      createRunObserver(
+        { onEvent, onRunEnd: (o) => void outcomes.push(o) },
+        { body: { input: "hi" }, request: runRequest({ input: "hi" }) },
+      ),
+    );
+
+    // Synchronously, so `pull` never runs.
+    await stream.cancel();
+
+    expect(abort).toHaveBeenCalled();
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "cancelled", output: "", attachments: [], error: null },
+    ]);
+  });
+
+  /** Yields `init`, waits for its signal to abort, then yields `after`, if given. */
+  function untilAborted(after?: AgentRunEvent) {
+    return async function* (_agentId: string, _body: unknown, opts: { signal: AbortSignal }) {
+      yield { event: "init", data: { run_id: RUN } };
+      await new Promise<void>((resolve) => {
+        if (opts.signal.aborted) resolve();
+        opts.signal.addEventListener("abort", () => resolve());
+      });
+      if (after) yield after;
+    };
+  }
+
+  /** Run `events`, abort the request's signal while it waits, and return what follows. */
+  async function abortMidway(
+    events: ReturnType<typeof untilAborted>,
+  ): Promise<{ rest: string; outcomes: RunOutcome[] }> {
+    const browser = new AbortController();
+    const outcomes: RunOutcome[] = [];
+    client.runStreamingAgent.mockImplementation(events);
+    const res = await withCallbacks({ onRunEnd: (o) => void outcomes.push(o) }).run(
+      runRequest({ input: "hi" }, { signal: browser.signal }),
+    );
+    const reader = res.body!.getReader();
+    await reader.read();
+    const decoder = new TextDecoder();
+    let rest = "";
+    const drained = (async () => {
+      for (let r = await reader.read(); !r.done; r = await reader.read()) rest += decoder.decode(r.value);
+    })();
+    browser.abort();
+    await drained;
+    return { rest, outcomes };
+  }
+
+  it.each([
+    [{ event: "error", data: { error: "Model unavailable" } }, "Model unavailable"],
+    [{ event: "timeout", data: {} }, expect.stringMatching(/waiting/)],
+  ])("reports an API %o after the request's signal aborted as `failed`", async (event, error) => {
+    const { rest, outcomes } = await abortMidway(untilAborted(event));
+    expect(eventNames(rest)).toEqual([event.event]);
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "failed", output: "", attachments: [], error },
+    ]);
+  });
+
+  it("reports `cancelled` when the upstream ends quietly after the request's signal aborted", async () => {
+    const { rest, outcomes } = await abortMidway(untilAborted());
+    expect(rest).toBe("");
+    expect(outcomes).toEqual([
+      { runId: RUN, status: "cancelled", output: "", attachments: [], error: null },
+    ]);
+  });
+
+  it("finishes onRunEnd before `done` is readable", async () => {
+    const gate = deferred();
+    const order: string[] = [];
+    client.runStreamingAgent.mockReturnValue(eventsOf(DONE));
+    const res = await withCallbacks({
+      onRunEnd: async () => {
+        await gate.promise;
+        order.push("onRunEnd resolved");
+      },
+    }).run(runRequest({ input: "hi" }));
+
+    const read = res.body!.getReader().read().then((r) => {
+      order.push("done read");
+      return r;
+    });
+    expect(await settles(read)).toBe(false);
+    gate.resolve();
+    expect(new TextDecoder().decode((await read).value)).toContain("event: done");
+    expect(order).toEqual(["onRunEnd resolved", "done read"]);
+  });
+
+  it("calls onEvent for `done` before onRunEnd, with the same context", async () => {
+    const calls: [string, RunCallbackContext][] = [];
+    client.runStreamingAgent.mockReturnValue(eventsOf(DONE));
+    const res = await withCallbacks({
+      onEvent: (e, ctx) => void calls.push([`onEvent ${e.event}`, ctx]),
+      onRunEnd: (_o, ctx) => void calls.push(["onRunEnd", ctx]),
+    }).run(runRequest({ input: "hi" }));
+    await res.text();
+
+    expect(calls.map(([name]) => name)).toEqual(["onEvent done", "onRunEnd"]);
+    expect(calls[0]![1]).toBe(calls[1]![1]);
+  });
+
+  describe("when a callback throws", () => {
+    const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+    const errorFrame = 'event: error\ndata: {"error":"The server could not process the run."}\n\n';
+
+    it("ends the stream with an error event in place of the event, and reports the failure once", async () => {
+      const log = quiet();
+      const { res, outcomes } = await runRecording(hanging(), {
+        onEvent: (e) => {
+          if (e.event === "stream_token") throw new Error("db down");
+        },
+      });
+      const { signal } = client.runStreamingAgent.mock.calls[0]![2];
+
+      const text = await res.text();
+
+      expect(text).toBe(`event: init\ndata: {"run_id":"${RUN}"}\n\n${errorFrame}`);
+      expect(signal.aborted).toBe(true);
+      // The token was read from the API, so it counts as streamed, though the
+      // browser never got it.
+      expect(outcomes).toEqual([
+        {
+          runId: RUN,
+          status: "failed",
+          output: "par",
+          attachments: [],
+          error: "The server could not process the run.",
+        },
+      ]);
+      expect(log).toHaveBeenCalledWith(expect.any(String), new Error("db down"));
+    });
+
+    it("sends an error event instead of `done` when onRunEnd rejects, without calling it again", async () => {
+      quiet();
+      const onRunEnd = vi.fn(async () => {
+        throw new Error("write failed");
+      });
+      client.runStreamingAgent.mockReturnValue(eventsOf({ event: "init", data: { run_id: RUN } }, DONE));
+
+      const res = await withCallbacks({ onRunEnd }).run(runRequest({ input: "hi" }));
+
+      expect(eventNames(await res.text())).toEqual(["init", "error"]);
+      expect(onRunEnd).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends an error event when onRunEnd throws at the end of the stream", async () => {
+      quiet();
+      const onRunEnd = vi.fn(() => {
+        throw new Error("write failed");
+      });
+      client.runStreamingAgent.mockReturnValue(eventsOf({ event: "init", data: { run_id: RUN } }));
+
+      const res = await withCallbacks({ onRunEnd }).run(runRequest({ input: "hi" }));
+
+      expect(await res.text()).toBe(`event: init\ndata: {"run_id":"${RUN}"}\n\n${errorFrame}`);
+      expect(onRunEnd).toHaveBeenCalledTimes(1);
+    });
+
+    it("still resolves a cancel when onRunEnd throws", async () => {
+      const log = quiet();
+      const onRunEnd = vi.fn(async () => {
+        throw new Error("write failed");
+      });
+      client.runStreamingAgent.mockImplementation(hanging());
+      const res = await withCallbacks({ onRunEnd }).run(runRequest({ input: "hi" }));
+      const reader = res.body!.getReader();
+      await reader.read();
+
+      await expect(reader.cancel()).resolves.toBeUndefined();
+      expect(onRunEnd).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledTimes(1);
     });
   });
 });

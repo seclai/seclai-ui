@@ -1,5 +1,6 @@
 import { Seclai, SeclaiApiVersion, type ApiVersion } from "@seclai/sdk";
 import { json, jsonError, toErrorResponse } from "./errors";
+import { createRunObserver, type RunEndCallback, type RunEventCallback } from "./run-callbacks";
 import { relayRunEvents, SSE_HEADERS } from "./sse";
 
 /**
@@ -35,6 +36,19 @@ export interface SeclaiHandlersOptions {
   apiVersion?: ApiVersion;
   /** How long a streaming run may take, in milliseconds. Defaults to 11 minutes. */
   runTimeoutMs?: number;
+  /**
+   * Called with each event of a run stream, in order, and awaited before the
+   * event is relayed to the browser. If it throws, the stream ends with an
+   * `error` event.
+   */
+  onEvent?: RunEventCallback;
+  /**
+   * Called exactly once for each run that started streaming, with how it ended.
+   * Awaited before the final `done`, `error` or `timeout` event is relayed, so
+   * whatever it stores is in place when the browser sees the run end. If it
+   * throws, the browser gets an `error` event instead.
+   */
+  onRunEnd?: RunEndCallback;
 }
 
 /** JSON body accepted by the `run` handler. */
@@ -114,6 +128,8 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
     agentId,
     apiVersion = DEFAULT_API_VERSION,
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
+    onEvent,
+    onRunEnd,
   } = options;
 
   // Without a key the SDK would go looking for credentials in ~/.seclai.
@@ -207,8 +223,12 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
         // A rejected run throws here, before any bytes are committed, so a bad
         // attachment or an empty credit balance can be a real HTTP error.
         const first = await events.next();
+        const observer =
+          onEvent || onRunEnd
+            ? createRunObserver({ onEvent, onRunEnd }, { body, request: req })
+            : undefined;
         return new Response(
-          relayRunEvents(first.done ? undefined : first.value, events, abort),
+          relayRunEvents(first.done ? undefined : first.value, events, abort, observer),
           { headers: SSE_HEADERS },
         );
       } catch (err) {
