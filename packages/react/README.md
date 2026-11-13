@@ -49,6 +49,40 @@ await start({ input: "Hello", uploadIds: ["..."], sessionId: "..." });
 - `start` resolves with the final state and doesn't reject. Failures appear in `status` and `error`.
 - `cancel` stops streaming, but the run carries on at Seclai.
 
+### Building your own UI
+
+`AgentChat` doesn't upload files. To send files from your own UI, use the helpers the components are built on:
+
+- **`createEndpoints({ basePath, agentId })`** returns the handler URLs (`AgentEndpoints`): `attachmentReferences`, `upload`, `run`, and `download(runId, attachmentId, name?)`. Pass it the same options as `useAgentRun`.
+- **`uploadFile(endpoints, file, { signal }?)`** uploads one file and resolves with its `id`.
+- **`fetchAttachmentReferences(endpoints, { signal }?)`** resolves with the files the agent accepts (`accepted_attachments`) and whether it needs any (`requires_uploads`).
+
+On an error response, `uploadFile` and `fetchAttachmentReferences` reject with an `Error` whose message comes from the handler. On a network failure or an aborted `signal`, they reject as `fetch` does.
+
+Upload the files first, then start the run with their ids:
+
+```tsx
+import { createEndpoints, uploadFile, useAgentRun } from "@seclai/react";
+
+const endpoints = createEndpoints({ agentId: "my-agent" });
+
+function Ask() {
+  const { start } = useAgentRun({ agentId: "my-agent" });
+
+  async function send(input: string, files: File[]) {
+    const uploads = await Promise.all(files.map((file) => uploadFile(endpoints, file)));
+    await start({ input, uploadIds: uploads.map((upload) => upload.id) });
+  }
+  // ...
+}
+```
+
+A run's `attachments` already have a `url`. To show a file from a run you stored earlier, build the URL with `download` rather than by hand:
+
+```tsx
+<a href={endpoints.download(saved.runId, saved.attachmentId, saved.name)}>{saved.name}</a>
+```
+
 ## Styling
 
 The components are unstyled apart from the optional stylesheet, which uses Seclai's colours by default. It's built on CSS variables you can set on `:root` or any ancestor, along with `seclai-*` class names:
