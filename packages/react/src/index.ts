@@ -1,9 +1,11 @@
 export {
   AgentChat,
   type AgentChatAttachButton,
+  type AgentChatAttachment,
   type AgentChatFile,
   type AgentChatMessage,
   type AgentChatProps,
+  type AgentChatTurn,
 } from "./AgentChat";
 export { AgentRunForm, type AgentRunFormProps } from "./AgentRunForm";
 export { SeclaiAgent, type SeclaiAgentProps } from "./SeclaiAgent";
