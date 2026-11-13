@@ -55,6 +55,72 @@ export const ALL: APIRoute = ({ request }) => seclai.handle(request);
 | `onEvent` | None | `(event, ctx)`: called with each run event before it is relayed. See [Run callbacks](#run-callbacks) |
 | `onRunEnd` | None | `(outcome, ctx)`: called once per run with how it ended. See [Run callbacks](#run-callbacks) |
 | `keepReadingAfterDisconnect` | `false` | Keep reading a run after the browser leaves, so `onRunEnd` gets its real outcome. See [Saving replies after a disconnect](#saving-replies-after-a-disconnect) |
+| `context` | None | `(req)`: your per-request context, such as the signed-in user, passed to every hook. See [Access control](#access-control) |
+| `authorizeRun` | None | `(req, body, ctx)`: refuse or rewrite a run. See [Access control](#access-control) |
+| `authorizeUpload` | None | `(req, file, ctx)`: refuse an upload before it reaches Seclai |
+| `authorizeDownload` | None | `(req, { runId, attachmentId }, ctx)`: return `true` to serve the file |
+
+### Access control
+
+Three hooks check requests against your own data before they reach the API. They apply to the individual handlers and to `handle`, and may be sync or async.
+
+```ts
+import { createSeclaiHandlers, deny } from "@seclai/handlers";
+
+const seclai = createSeclaiHandlers({
+  apiKey: process.env.SECLAI_API_KEY!,
+  agentId: process.env.SECLAI_AGENT_ID!,
+
+  // Runs once per hooked request, only when a hook needs it.
+  async context(req) {
+    const user = await getUser(req);
+    if (!user) throw deny(401, "Sign in first.");
+    return { user };
+  },
+
+  async authorizeRun(req, body, { user }) {
+    if (body.sessionId && !(await db.sessionBelongsTo(body.sessionId, user.id))) {
+      return deny(403, "That isn't your conversation.");
+    }
+    // Returning nothing runs the body as it is.
+  },
+
+  authorizeUpload: (req, file, { user }) => user.canUpload,
+
+  async authorizeDownload(req, { runId }, { user }) {
+    return db.runBelongsTo(runId, user.id);
+  },
+});
+```
+
+**Allowing and refusing**
+
+| Hook | Allow | Refuse |
+|---|---|---|
+| `authorizeRun` | Return nothing or `true`, or a rewritten body to run instead | `false` (403), or a `Response` |
+| `authorizeUpload` | Return nothing or `true` | `false` (403), or a `Response` |
+| `authorizeDownload` | Return `true` | `false` (404), or a `Response`. Returning nothing also refuses, and logs a warning |
+
+- **Any hook can refuse by throwing a `Response`**, or by returning one, so a check deep in your data layer can `throw deny(...)`. The `context` function can too, which refuses every hooked request at once.
+- **`deny(status, message)`** builds the same `{ error, status }` JSON the handlers use for their own errors. `@seclai/react` shows the `error` text to the user.
+- **`authorizeDownload` fails closed** because it guards stored files: anything but `true` or a `Response` is a 404, the same as a missing file, so a refusal doesn't confirm the file exists.
+- **Rewrites.** `authorizeRun` gets the body after `run` has validated it. It may return a rewritten body, for example to add context to `input` or swap in server-side `uploadIds`. The rewrite is validated again.
+- **Errors.** If a hook or `context` throws anything other than a `Response`, the browser gets a 500 with a generic message, and the error is logged with `console.error`. A rewrite that fails validation is also a logged 500, with the reason.
+
+**Context your framework already has**
+
+When your framework has already resolved the user, pass it with `withContext` instead of the `context` option. It returns the same handlers with that context bound, so they keep the `(req) => Response` shape:
+
+```ts
+// React Router: app/routes/api.seclai.$action.ts
+const seclai = createSeclaiHandlers<{ userId: string }>({ apiKey, agentId, authorizeRun, authorizeDownload });
+
+export const loader = ({ request, context }: Route.LoaderArgs) =>
+  seclai.withContext({ userId: context.get(userContext).id }).handle(request);
+export const action = loader;
+```
+
+The context's type is inferred from the `context` option, or set as the type parameter. Without a `context` option, a typed context is only reachable through `withContext`: TypeScript doesn't offer `seclai.handle` on its own, so a route can't call the hooks without the context. A context type that includes `undefined` keeps the plain handlers.
 
 ## The run stream
 
@@ -138,8 +204,8 @@ The option only takes effect with `onEvent` or `onRunEnd` set.
 
 ## Limits to know before deploying
 
-- **The endpoints have no auth.** Anyone who can reach them can run your agent on your credits. Put your own access control or rate limiting in front of a public deployment.
-- **The API key is account-wide.** `download` checks that ids are well formed, but the API only checks that a run belongs to the account, not to this agent. Anyone holding a run's id and a file's id from the same account could fetch that file. Run ids are random UUIDs, so they can't be guessed.
+- **The endpoints have no auth by default.** Anyone who can reach them can run your agent on your credits. Use the [access-control hooks](#access-control) to check the caller, and put rate limiting in front of a public deployment. `attachment-references` has no hook, so guard that route yourself if the agent's accepted files are sensitive.
+- **The API key is account-wide.** `download` checks that ids are well formed, but the API only checks that a run belongs to the account, not to this agent. Without [`authorizeDownload`](#access-control), anyone holding a run's id and a file's id from the same account could fetch that file. Run ids are random UUIDs, so they can't be guessed, but only your app knows which runs a caller may read.
 - **Uploads pass through your function**, so your platform's body limit applies, not the API's 200 MB: about 4.5 MB on Vercel and 6 MB on Netlify. The API has no CORS, so the browser can't upload to it directly.
 - **Your platform's function duration limit** may end a long run before `runTimeoutMs` does.
 
