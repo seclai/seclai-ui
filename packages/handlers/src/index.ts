@@ -1,4 +1,5 @@
 export {
+  ATTACHMENT_SLOTS_TTL_MS,
   createSeclaiHandlers,
   DEFAULT_API_VERSION,
   MIN_API_VERSION,
@@ -8,4 +9,6 @@ export type {
   SeclaiHandler,
   SeclaiHandlers,
   SeclaiHandlersOptions,
+  SeclaiUploadOptions,
+  UploadResult,
 } from "./handlers";

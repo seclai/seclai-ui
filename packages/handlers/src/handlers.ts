@@ -1,4 +1,9 @@
-import { Seclai, SeclaiApiVersion, type ApiVersion } from "@seclai/sdk";
+import {
+  Seclai,
+  SeclaiApiVersion,
+  type AcceptedAttachmentSlot,
+  type ApiVersion,
+} from "@seclai/sdk";
 import { json, jsonError, toErrorResponse } from "./errors";
 import { relayRunEvents, SSE_HEADERS } from "./sse";
 
@@ -26,6 +31,101 @@ const ATTACHMENT_ID = /^[A-Za-z0-9_-]+={0,2}$/;
 /** The API's limit on `download_name`. */
 const MAX_DOWNLOAD_NAME_LENGTH = 255;
 
+/**
+ * How long `upload.checkContentType` reuses the agent's attachment slots. Short,
+ * so a slot edited on Seclai takes effect within a minute, but long enough that a
+ * burst of uploads makes one lookup.
+ */
+export const ATTACHMENT_SLOTS_TTL_MS = 60 * 1000;
+
+/**
+ * Room for the multipart boundaries, part headers and any other form fields when
+ * the body's size is compared with `upload.maxBytes`, so a file just under the
+ * limit isn't refused for its envelope.
+ */
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
+/**
+ * Read a multipart body, failing with `"too-large"` once more than `limit` bytes
+ * have arrived. The bytes are counted as they stream, so a body without a
+ * `content-length` is cut off there instead of being buffered whole; erroring the
+ * stream also cancels the request's body. The counted bytes are parsed through a
+ * `Response`, which takes a stream body on every runtime, where a `Request` would
+ * need `duplex: "half"` on Node.
+ */
+async function readLimitedForm(req: Request, limit: number): Promise<FormData | "too-large"> {
+  if (!req.body) return req.formData();
+  let received = 0;
+  let exceeded = false;
+  const counted = req.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        received += chunk.byteLength;
+        if (received > limit) {
+          exceeded = true;
+          controller.error(new Error("The request body is over the size limit."));
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  const headers = new Headers();
+  const contentType = req.headers.get("content-type");
+  if (contentType) headers.set("content-type", contentType);
+  try {
+    return await new Response(counted, { headers }).formData();
+  } catch (err) {
+    if (exceeded) return "too-large";
+    throw err;
+  }
+}
+
+/** What the `upload` handler returns, and what `upload.onUpload` receives. */
+export interface UploadResult {
+  /** Pass this in `uploadIds` to the `run` handler. */
+  id: string;
+  status: string;
+  filename: string;
+  content_type: string;
+  file_size: number;
+}
+
+/** Checks and a hook for the `upload` handler. All are off by default. */
+export interface SeclaiUploadOptions {
+  /**
+   * Largest file accepted, in bytes. Anything bigger gets a 413 without reaching
+   * the API. A request whose `content-length` is too big is refused before its
+   * body is read; otherwise the body is counted as it streams and reading stops
+   * once it passes the limit plus 64 KB for the multipart envelope.
+   */
+  maxBytes?: number;
+  /**
+   * Refuse with a 415, without reaching the API, a file whose type none of the
+   * agent's accepted attachment slots allows. A file of unknown type (none, or
+   * `application/octet-stream`, which a typeless file arrives as) isn't checked:
+   * the API decides. The slots are read with
+   * `getAgentAttachmentReferences` and reused for {@link ATTACHMENT_SLOTS_TTL_MS}.
+   * An agent with no slots accepts nothing, and a failed lookup refuses the
+   * upload.
+   *
+   * The reused slots belong to this `createSeclaiHandlers` instance. Where the
+   * handlers are created per request, as on Cloudflare Workers, every upload makes
+   * its own lookup.
+   */
+  checkContentType?: boolean;
+  /**
+   * Called after a successful upload, for example to keep a copy of the file or
+   * record which session it belongs to. Return a `Response` to send it instead of
+   * the default JSON. `req`'s body has already been read. A throw becomes a 500.
+   */
+  onUpload?(
+    file: File,
+    result: UploadResult,
+    req: Request,
+  ): void | Response | Promise<void | Response>;
+}
+
 export interface SeclaiHandlersOptions {
   /** Seclai API key. Server-side only: never expose it to the browser. */
   apiKey: string;
@@ -35,6 +135,8 @@ export interface SeclaiHandlersOptions {
   apiVersion?: ApiVersion;
   /** How long a streaming run may take, in milliseconds. Defaults to 11 minutes. */
   runTimeoutMs?: number;
+  /** Size limit, content-type check and hook for the `upload` handler. */
+  upload?: SeclaiUploadOptions;
 }
 
 /** JSON body accepted by the `run` handler. */
@@ -102,6 +204,32 @@ function parseRunBody(body: unknown): RunRequestBody | string {
 }
 
 /**
+ * What a file of unknown type arrives as: no type, or the generic type multipart
+ * encoding gives a part whose `File` had none.
+ */
+const UNKNOWN_TYPES = new Set(["", "application/octet-stream"]);
+
+/** A MIME type without parameters, lowercased: `Text/Plain; charset=x` is `text/plain`. */
+function essence(type: string): string {
+  return type.split(";")[0]!.trim().toLowerCase();
+}
+
+/**
+ * Whether a slot takes a file of this (non-empty) type. Slot patterns are exact
+ * types or `type/*`, and a slot without any accepts every type.
+ */
+function slotAllows(slot: AcceptedAttachmentSlot, type: string): boolean {
+  const patterns = slot.content_types ?? [];
+  if (patterns.length === 0) return true;
+  return patterns.some((raw) => {
+    const pattern = essence(raw);
+    if (pattern === "*" || pattern === "*/*") return true;
+    if (pattern.endsWith("/*")) return type.startsWith(pattern.slice(0, -1));
+    return pattern === type;
+  });
+}
+
+/**
  * Create the server handlers for one agent. Each takes a Web `Request` and
  * returns a Web `Response`, so they mount on any runtime with those APIs. Routing
  * is left to the host framework.
@@ -114,7 +242,9 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
     agentId,
     apiVersion = DEFAULT_API_VERSION,
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
+    upload: uploadOptions = {},
   } = options;
+  const { maxBytes, checkContentType = false, onUpload } = uploadOptions;
 
   // Without a key the SDK would go looking for credentials in ~/.seclai.
   if (!apiKey) throw new Error("createSeclaiHandlers: `apiKey` is required.");
@@ -125,6 +255,9 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
       `createSeclaiHandlers: \`apiVersion\` must be ${MIN_API_VERSION} or later, got ${apiVersion}.`,
     );
   }
+  if (maxBytes !== undefined && !(Number.isFinite(maxBytes) && maxBytes > 0)) {
+    throw new Error("createSeclaiHandlers: `upload.maxBytes` must be a positive number.");
+  }
 
   const client = new Seclai({
     apiKey,
@@ -133,6 +266,28 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
     // when called with any `this` but the global, so it can't be passed bare.
     fetch: (input, init) => globalThis.fetch(input, init),
   });
+
+  // One lookup in flight at a time, shared by concurrent uploads. A failure isn't
+  // kept, so the next upload tries again.
+  let slots: { promise: Promise<AcceptedAttachmentSlot[]>; expires: number } | undefined;
+  function attachmentSlots(): Promise<AcceptedAttachmentSlot[]> {
+    if (!slots || Date.now() >= slots.expires) {
+      const entry = {
+        promise: client
+          .getAgentAttachmentReferences(agentId)
+          .then((refs) => refs.accepted_attachments ?? []),
+        expires: Date.now() + ATTACHMENT_SLOTS_TTL_MS,
+      };
+      entry.promise.catch(() => {
+        if (slots === entry) slots = undefined;
+      });
+      slots = entry;
+    }
+    return slots.promise;
+  }
+
+  const tooLarge = () =>
+    jsonError(413, `The file is larger than the ${maxBytes}-byte limit.`);
 
   const handlers: Omit<SeclaiHandlers, "handle"> = {
     async attachmentReferences(req) {
@@ -147,9 +302,20 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
     async upload(req) {
       if (req.method !== "POST") return wrongMethod("POST");
 
+      // Refuse an oversized body before reading it when its length is declared.
+      // Without `content-length`, the body is counted as it streams instead, and
+      // the file's own size is checked once the form is read.
+      const bodyLimit = maxBytes === undefined ? undefined : maxBytes + MULTIPART_OVERHEAD_BYTES;
+      if (bodyLimit !== undefined) {
+        const length = Number(req.headers.get("content-length"));
+        if (length > bodyLimit) return tooLarge();
+      }
+
       let form: FormData;
       try {
-        form = await req.formData();
+        const read = bodyLimit === undefined ? await req.formData() : await readLimitedForm(req, bodyLimit);
+        if (read === "too-large") return tooLarge();
+        form = read;
       } catch {
         return jsonError(400, "The request body must be multipart form data.");
       }
@@ -158,23 +324,47 @@ export function createSeclaiHandlers(options: SeclaiHandlersOptions): SeclaiHand
       if (file === null || typeof file === "string") {
         return jsonError(400, "The form must include a `file` field holding a file.");
       }
+      if (maxBytes !== undefined && file.size > maxBytes) return tooLarge();
 
+      let result: UploadResult;
       try {
+        // An unknown type isn't a wrong one: browsers give none to `.md`, some
+        // `.csv` files or HEIC on Windows, and multipart encoding then labels the
+        // part `application/octet-stream`. Those go on and the API decides.
+        const type = essence(file.type);
+        if (checkContentType && !UNKNOWN_TYPES.has(type)) {
+          const accepted = await attachmentSlots();
+          if (!accepted.some((slot) => slotAllows(slot, type))) {
+            return jsonError(415, `This agent does not accept files of type ${type}.`);
+          }
+        }
+
         const upload = await client.uploadAgentInput(agentId, {
           file,
           fileName: file.name,
           mimeType: file.type || undefined,
         });
-        return json({
+        result = {
           id: upload.id,
           status: upload.status,
           filename: upload.filename,
           content_type: upload.content_type,
           file_size: upload.file_size,
-        });
+        };
       } catch (err) {
         return toErrorResponse(err);
       }
+
+      if (onUpload) {
+        try {
+          const replacement = await onUpload(file, result, req);
+          if (replacement instanceof Response) return replacement;
+        } catch {
+          // The app's own error: its message could hold anything, so it stays here.
+          return jsonError(500, "The server failed to finish handling the upload.");
+        }
+      }
+      return json(result);
     },
 
     async run(req) {

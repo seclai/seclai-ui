@@ -1,6 +1,6 @@
 import { SeclaiAPIStatusError, SeclaiStreamingError, type AgentRunEvent } from "@seclai/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSeclaiHandlers } from "../src";
+import { ATTACHMENT_SLOTS_TTL_MS, createSeclaiHandlers, type SeclaiUploadOptions } from "../src";
 import { KEEPALIVE_INTERVAL_MS } from "../src/sse";
 
 const client = vi.hoisted(() => ({
@@ -204,6 +204,286 @@ describe("upload", () => {
       new Request(`${URL_BASE}/upload`, { method: "POST", body: "{}" }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("upload options", () => {
+  const UPLOADED = {
+    id: "up-1",
+    status: "ready",
+    filename: "a.png",
+    content_type: "image/png",
+    file_size: 5,
+  };
+
+  const withUpload = (upload: SeclaiUploadOptions) =>
+    createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, upload });
+
+  function uploadRequest(file: File, headers?: HeadersInit) {
+    const form = new FormData();
+    form.set("file", file);
+    return new Request(`${URL_BASE}/upload`, { method: "POST", body: form, headers });
+  }
+
+  const png = (body = "hello") => new File([body], "a.png", { type: "image/png" });
+
+  function slots(...accepted: Array<{ name: string; content_types?: string[] }>) {
+    client.getAgentAttachmentReferences.mockResolvedValue({
+      requires_uploads: accepted.length > 0,
+      accepted_attachments: accepted.map((slot) => ({ min: 0, ...slot })),
+    });
+  }
+
+  beforeEach(() => {
+    client.uploadAgentInput.mockResolvedValue(UPLOADED);
+  });
+
+  it("rejects maxBytes other than a positive number", () => {
+    for (const maxBytes of [0, -1, Number.NaN, Infinity]) {
+      expect(() => withUpload({ maxBytes })).toThrow(/maxBytes/);
+    }
+  });
+
+  describe("maxBytes", () => {
+    it("refuses an oversized body from its content-length without reading it", async () => {
+      const req = uploadRequest(png(), { "content-length": String(10 * 1024 * 1024) });
+      const formData = vi.spyOn(req, "formData");
+
+      const res = await withUpload({ maxBytes: 1024 * 1024 }).upload(req);
+
+      expect(res.status).toBe(413);
+      expect(await res.json()).toEqual({
+        error: "The file is larger than the 1048576-byte limit.",
+        status: 413,
+      });
+      expect(formData).not.toHaveBeenCalled();
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("stops reading a chunked body without content-length once it passes the limit", async () => {
+      const boundary = "limit-test";
+      const encoder = new TextEncoder();
+      const chunk = new Uint8Array(16 * 1024).fill(97);
+      const totalChunks = 200; // 3.2 MB, far over 1 KB + the 64 KB envelope
+      let sent = 0;
+      let cancelled = false;
+      const source = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent === 0) {
+            controller.enqueue(
+              encoder.encode(
+                `--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="a.bin"\r\n` +
+                  "content-type: application/octet-stream\r\n\r\n",
+              ),
+            );
+          }
+          if (sent === totalChunks) {
+            controller.enqueue(encoder.encode(`\r\n--${boundary}--\r\n`));
+            controller.close();
+            return;
+          }
+          sent++;
+          controller.enqueue(chunk);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const req = new Request(`${URL_BASE}/upload`, {
+        method: "POST",
+        headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+        body: source,
+        duplex: "half",
+      } as RequestInit);
+      expect(req.headers.get("content-length")).toBeNull();
+
+      const res = await withUpload({ maxBytes: 1024 }).upload(req);
+
+      expect(res.status).toBe(413);
+      expect(await res.json()).toEqual({
+        error: "The file is larger than the 1024-byte limit.",
+        status: 413,
+      });
+      expect(cancelled).toBe(true);
+      expect(sent).toBeLessThan(totalChunks);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("refuses a file over the limit by its actual size", async () => {
+      const res = await withUpload({ maxBytes: 4 }).upload(uploadRequest(png("hello")));
+      expect(res.status).toBe(413);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("accepts a file at the limit, leaving room for the multipart envelope", async () => {
+      const res = await withUpload({ maxBytes: 5 }).upload(
+        uploadRequest(png("hello"), { "content-length": "400" }),
+      );
+      expect(res.status).toBe(200);
+      expect(client.uploadAgentInput).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("checkContentType", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("uploads a file a slot allows", async () => {
+      slots(
+        { name: "doc", content_types: ["application/pdf"] },
+        { name: "photo", content_types: ["image/png"] },
+      );
+      const res = await withUpload({ checkContentType: true }).upload(uploadRequest(png()));
+      expect(res.status).toBe(200);
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledWith(AGENT);
+      expect(client.uploadAgentInput).toHaveBeenCalledOnce();
+    });
+
+    it("refuses a file no slot allows without calling the upload API", async () => {
+      slots({ name: "doc", content_types: ["application/pdf"] });
+      const res = await withUpload({ checkContentType: true }).upload(uploadRequest(png()));
+      expect(res.status).toBe(415);
+      expect(await res.json()).toEqual({
+        error: "This agent does not accept files of type image/png.",
+        status: 415,
+      });
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a type wildcard", ["image/*"], "image/png", true],
+      ["a type wildcard for another type", ["image/*"], "text/plain", false],
+      ["a wildcard without its slash", ["image/*"], "imagery/png", false],
+      ["a full wildcard", ["*/*"], "text/plain", true],
+      ["different case", ["Image/PNG"], "image/png", true],
+      ["parameters on the file's type", ["text/plain"], "text/plain;charset=utf-8", true],
+      ["a slot without types", [], "application/x-anything", true],
+      ["a typeless file and a typed slot", ["image/*"], "", true],
+      ["a typeless file and an any-type slot", [], "", true],
+      ["an octet-stream file and a typed slot", ["image/*"], "application/octet-stream", true],
+    ])("handles %s", async (_label, contentTypes, fileType, allowed) => {
+      slots({ name: "files", content_types: contentTypes });
+      const res = await withUpload({ checkContentType: true }).upload(
+        uploadRequest(new File(["x"], "f", { type: fileType })),
+      );
+      expect(res.status).toBe(allowed ? 200 : 415);
+    });
+
+    it("leaves a file without a type to the API, without looking up the slots", async () => {
+      slots();
+      const res = await withUpload({ checkContentType: true }).upload(
+        uploadRequest(new File(["# notes"], "notes.md", { type: "" })),
+      );
+      expect(res.status).toBe(200);
+      expect(client.getAgentAttachmentReferences).not.toHaveBeenCalled();
+      expect(client.uploadAgentInput).toHaveBeenCalledOnce();
+    });
+
+    it("refuses every typed file when the agent declares no slots", async () => {
+      slots();
+      const res = await withUpload({ checkContentType: true }).upload(uploadRequest(png()));
+      expect(res.status).toBe(415);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("looks the slots up once within the TTL, and again after it", async () => {
+      vi.useFakeTimers();
+      slots({ name: "photo", content_types: ["image/*"] });
+      const seclai = withUpload({ checkContentType: true });
+
+      await seclai.upload(uploadRequest(png()));
+      await seclai.upload(uploadRequest(png()));
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledOnce();
+      expect(client.uploadAgentInput).toHaveBeenCalledTimes(2);
+
+      vi.advanceTimersByTime(ATTACHMENT_SLOTS_TTL_MS);
+      await seclai.upload(uploadRequest(png()));
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+    });
+
+    it("refuses the upload when the lookup fails, and retries on the next one", async () => {
+      client.getAgentAttachmentReferences.mockRejectedValueOnce(new Error("secret-key down"));
+      const seclai = withUpload({ checkContentType: true });
+
+      const res = await seclai.upload(uploadRequest(png()));
+      expect(res.status).toBe(502);
+      expect(await res.text()).not.toContain("secret-key");
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+
+      slots({ name: "photo", content_types: ["image/*"] });
+      expect((await seclai.upload(uploadRequest(png()))).status).toBe(200);
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+    });
+
+    it("checks the size before looking up the slots", async () => {
+      const res = await withUpload({ maxBytes: 1, checkContentType: true }).upload(
+        uploadRequest(png()),
+      );
+      expect(res.status).toBe(413);
+      expect(client.getAgentAttachmentReferences).not.toHaveBeenCalled();
+    });
+
+    it("is off by default", async () => {
+      expect((await handlers().upload(uploadRequest(png()))).status).toBe(200);
+      expect(client.getAgentAttachmentReferences).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("onUpload", () => {
+    it("receives the file, result and request, and keeps the default response", async () => {
+      const onUpload = vi.fn();
+      const req = uploadRequest(png());
+
+      const res = await withUpload({ onUpload }).upload(req);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(UPLOADED);
+      const [file, result, passed] = onUpload.mock.calls[0]!;
+      expect(await (file as File).text()).toBe("hello");
+      expect((file as File).name).toBe("a.png");
+      expect(result).toEqual(UPLOADED);
+      expect(passed).toBe(req);
+    });
+
+    it("replaces the response with one it returns", async () => {
+      const res = await withUpload({
+        onUpload: async (_file, result) =>
+          Response.json({ id: result.id, url: "/files/1" }, { status: 201 }),
+      }).upload(uploadRequest(png()));
+
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: "up-1", url: "/files/1" });
+    });
+
+    it("turns a throw into a 500 without leaking its message", async () => {
+      const res = await withUpload({
+        onUpload: () => {
+          throw new Error("db password is hunter2");
+        },
+      }).upload(uploadRequest(png()));
+
+      expect(res.status).toBe(500);
+      const text = await res.text();
+      expect(JSON.parse(text).status).toBe(500);
+      expect(text).not.toContain("hunter2");
+    });
+
+    it("is not called when the upload fails", async () => {
+      client.uploadAgentInput.mockRejectedValue(statusError(400));
+      const onUpload = vi.fn();
+      const res = await withUpload({ onUpload }).upload(uploadRequest(png()));
+      expect(res.status).toBe(400);
+      expect(onUpload).not.toHaveBeenCalled();
+    });
+
+    it("is not called when a file is refused", async () => {
+      slots({ name: "doc", content_types: ["application/pdf"] });
+      const onUpload = vi.fn();
+      const res = await withUpload({ checkContentType: true, onUpload }).upload(
+        uploadRequest(png()),
+      );
+      expect(res.status).toBe(415);
+      expect(onUpload).not.toHaveBeenCalled();
+    });
   });
 });
 
