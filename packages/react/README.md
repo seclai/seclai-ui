@@ -38,7 +38,9 @@ export function App() {
 Build your own UI on the hook:
 
 ```tsx
-const { status, text, steps, attachments, error, start, cancel } = useAgentRun();
+const { status, text, steps, attachments, error, startedAt, start, cancel, reset } = useAgentRun({
+  onEvent: (event) => console.debug(event.event, event.data),
+});
 
 await start({ input: "Hello", uploadIds: ["..."], sessionId: "..." });
 ```
@@ -46,8 +48,35 @@ await start({ input: "Hello", uploadIds: ["..."], sessionId: "..." });
 - `status` is `idle`, `running`, `completed`, `failed` or `cancelled`.
 - `text` holds streamed tokens while running, then the run's final output.
 - `attachments` have a `url` that goes through your download handler.
-- `start` resolves with the final state and doesn't reject. Failures appear in `status` and `error`.
+- `startedAt` is when `start` began, from `Date.now()`. It's kept after the run ends and is `null` before the first run and after `reset`.
+- `start` resolves with the final state and doesn't reject. Failures appear in `status` and `error`. A run stopped by `cancel()` or `reset()` resolves as `cancelled`.
 - `cancel` stops streaming, but the run carries on at Seclai.
+- `reset` returns to `idle` and clears `text`, `steps`, `attachments`, `error`, `runId` and `startedAt`. During a run it stops streaming as `cancel` does, so the run also carries on at Seclai.
+- `onEvent` is called with each event from the run stream, `{ event, data }`, in order, as the hook updates its state. Events from a stopped run aren't passed on. The latest callback is always used, so an inline function is fine. If it throws, the error goes to `console.error` and the run carries on.
+
+Options also take `basePath` and `agentId`, as the components do.
+
+Runs that generate images can take a minute or two, so show the time elapsed:
+
+```tsx
+function Elapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  return <>{Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}</>;
+}
+
+const run = useAgentRun();
+
+{run.status === "running" && run.startedAt !== null && (
+  <p>
+    Usually takes a minute or two · <Elapsed startedAt={run.startedAt} />
+  </p>
+)}
+```
 
 ## Styling
 
