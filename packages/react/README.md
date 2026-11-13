@@ -33,6 +33,31 @@ export function App() {
 - **`AgentChat`** sends each message as a run with a shared session id and streams the reply.
 - **`SeclaiAgent`** renders one of the two based on `mode`.
 
+### Files in `AgentChat`
+
+When the agent accepts attachments, `AgentChat` shows an **Attach** button. Files can also be dropped on the composer or pasted into the message box. Each file uploads as soon as it's added and shows as a chip, with a thumbnail for images, and its upload id goes with the next message. Send stays disabled while a file is uploading. The files a user sent show in their turn. Agents that take no files get the text-only chat, with no attach button.
+
+The chat applies the agent's attachment slots to each message as a whole: it accepts the content types of all the slots, and up to the sum of their `max` (no limit if any slot has none). A file that doesn't fit is refused with a message under the box. A file the browser reports no type for (such as HEIC on Windows, or `.md`) isn't refused for its type: the server decides. A run takes one flat list of upload ids, so the chat can't fill slots separately.
+
+To tell files apart, add named buttons with tags, then use the tags in `onBeforeSend` to describe the files to the agent. Whatever it returns is sent as the run's input, and the transcript keeps what the user typed:
+
+```tsx
+<AgentChat
+  attachButtons={[
+    { label: "+ Headshot", tag: "headshot" },
+    { label: "+ Style reference", tag: "style" },
+  ]}
+  onBeforeSend={({ input, files }) =>
+    [...files.map((f, i) => `Image ${i + 1} (${f.name}) is the ${f.tag ?? "image"}.`), input].join("\n")
+  }
+/>
+```
+
+| Prop | |
+|---|---|
+| `attachButtons` | `{ label: string; tag?: string }[]`. Replaces the single Attach button. Dropped and pasted files have no tag |
+| `onBeforeSend` | `({ input, files }) => string \| void`, where `files` are `{ uploadId, name, contentType, tag? }`. Return a string to send it in place of the typed text |
+
 ### `useAgentRun`
 
 Build your own UI on the hook:
@@ -76,6 +101,40 @@ const run = useAgentRun();
     Usually takes a minute or two · <Elapsed startedAt={run.startedAt} />
   </p>
 )}
+```
+
+### Building your own UI
+
+To upload files and run the agent from your own UI, use the helpers the components are built on:
+
+- **`createEndpoints({ basePath, agentId })`** returns the handler URLs (`AgentEndpoints`): `attachmentReferences`, `upload`, `run`, and `download(runId, attachmentId, name?)`. Pass it the same options as `useAgentRun`.
+- **`uploadFile(endpoints, file, { signal }?)`** uploads one file and resolves with its `id`.
+- **`fetchAttachmentReferences(endpoints, { signal }?)`** resolves with the files the agent accepts (`accepted_attachments`) and whether it needs any (`requires_uploads`).
+
+On an error response, `uploadFile` and `fetchAttachmentReferences` reject with an `Error` whose message comes from the handler. On a network failure or an aborted `signal`, they reject as `fetch` does.
+
+Upload the files first, then start the run with their ids:
+
+```tsx
+import { createEndpoints, uploadFile, useAgentRun } from "@seclai/react";
+
+const endpoints = createEndpoints({ agentId: "my-agent" });
+
+function Ask() {
+  const { start } = useAgentRun({ agentId: "my-agent" });
+
+  async function send(input: string, files: File[]) {
+    const uploads = await Promise.all(files.map((file) => uploadFile(endpoints, file)));
+    await start({ input, uploadIds: uploads.map((upload) => upload.id) });
+  }
+  // ...
+}
+```
+
+A run's `attachments` already have a `url`. To show a file from a run you stored earlier, build the URL with `download` rather than by hand:
+
+```tsx
+<a href={endpoints.download(saved.runId, saved.attachmentId, saved.name)}>{saved.name}</a>
 ```
 
 ## Styling
