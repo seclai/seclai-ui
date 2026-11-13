@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { createEndpoints, fetchAttachmentReferences, uploadFile } from "./endpoints";
+import { useMemo, useState, type FormEvent } from "react";
+import { acceptAttribute, useAcceptedAttachments } from "./attachments";
+import { createEndpoints, uploadFile } from "./endpoints";
 import { MarkdownContent } from "./placeholders/MarkdownContent";
 import { MediaPreview } from "./placeholders/MediaPreview";
 import type { AcceptedAttachmentSlot, AgentEndpointOptions } from "./types";
@@ -31,25 +32,11 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
   const endpoints = useMemo(() => createEndpoints({ basePath, agentId }), [basePath, agentId]);
   const run = useAgentRun({ basePath, agentId });
 
-  const [slots, setSlots] = useState<AcceptedAttachmentSlot[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const { slots, error: loadError } = useAcceptedAttachments(endpoints);
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<Record<string, File[]>>({});
   const [uploading, setUploading] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setSlots(null);
-    setLoadError(null);
-    fetchAttachmentReferences(endpoints, { signal: controller.signal })
-      .then((refs) => setSlots(refs.accepted_attachments ?? []))
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadError(err instanceof Error ? err.message : "Could not load this agent.");
-      });
-    return () => controller.abort();
-  }, [endpoints]);
 
   const selected = Object.values(files).flat();
   const busy = uploading || run.status === "running";
@@ -130,7 +117,7 @@ export function AgentRunForm({ basePath, agentId, inputLabel = "Input", onFinish
             <input
               type="file"
               name={slot.name}
-              accept={slot.content_types?.length ? slot.content_types.join(",") : undefined}
+              accept={acceptAttribute(slot.content_types)}
               multiple={slot.max == null || slot.max > 1}
               onChange={(e) =>
                 setFiles((prev) => ({ ...prev, [slot.name]: Array.from(e.target.files ?? []) }))
