@@ -154,6 +154,44 @@ Fonts and text colour come from your page. The default colours follow your page'
 
 **On a dark page, declare `color-scheme: dark`** (or `light dark`). Without it the defaults stay in their light versions, and the purple links and focus rings are too dark to read.
 
+## Media
+
+`AgentRunForm` and `AgentChat` show a run's attachments in a `MediaGallery`. The media components are exported too, for your own UI:
+
+```tsx
+import { MediaGallery, MediaPreview, MediaSkeleton, MediaViewer } from "@seclai/react";
+
+<MediaGallery
+  attachments={run.attachments}
+  aspectRatio="16 / 9"
+  pending={run.status === "running" ? 4 : 0}
+  actions={(attachment, number) => <button onClick={() => refine(number)}>Refine</button>}
+/>
+```
+
+- **`MediaPreview`** shows one attachment. An image gets a card: a fixed-ratio frame so the layout doesn't jump while it loads, an optional number badge and a download link. Files that aren't images are a download link.
+- **`MediaGallery`** lays out a run's images as numbered cards that open a full-size viewer, with "Download all" when there's more than one. It downloads the files one at a time, because browsers block a burst of simultaneous downloads. Other files follow the images as download links.
+- **`MediaSkeleton`** is a placeholder card for an image that's still being generated. It pulses, unless the user prefers reduced motion.
+- **`MediaViewer`** is the gallery's full-size viewer, a modal `<dialog>` with previous and next (also on the arrow keys) and a download button. Escape, the close button or a click on the backdrop closes it, and focus goes back to where it was. It's controlled: pass the `index` to show, or `null` when closed.
+- **`attachmentFileName(attachment, number?)`** is the filename the components save a file as: its own name, or else `image-<number>` (or its id) with an extension from the mime type, such as `image-2.png`.
+
+| `MediaPreview` prop | |
+|---|---|
+| `attachment` | Required. The file to show |
+| `aspectRatio` | The frame's ratio, as a number (`16 / 9`) or a string (`"16 / 9"`). Without it the frame takes the image's own ratio once it loads, and `--seclai-media-aspect-ratio` (square) until then |
+| `number` | A badge on the image, matching the agent's numbered list. Also names an unnamed download `image-<number>` |
+| `actions` | App-specific buttons after the download link: a node, or a function of the attachment |
+| `onOpen` | Makes the image a button, for opening a viewer |
+
+| `MediaGallery` prop | |
+|---|---|
+| `attachments` | Required. A run's attachments |
+| `aspectRatio` | Every card's ratio. Without it each card takes its image's own ratio |
+| `pending` | How many skeleton cards to show after the images, numbered on from them |
+| `actions` | `(attachment, number) => ReactNode`, for each image card |
+
+The stylesheet adds these variables for media: `--seclai-media-aspect-ratio` (a frame's ratio before its image loads, `1 / 1`), `--seclai-media-fit` (`object-fit` in the frame, `scale-down`, so small images keep their natural size), `--seclai-media-min-width` (a gallery column's minimum width, `220px`) and `--seclai-media-max-width` (a card's width outside a gallery, `480px`). The viewer is dark in both colour schemes.
+
 ## Placeholders
 
 These are exported so the API is in place, but they're minimal until they're ported from the main Seclai app:
@@ -161,7 +199,7 @@ These are exported so the API is in place, but they're minimal until they're por
 | Export | For now | Coming |
 |---|---|---|
 | `MarkdownContent` | Plain text | GFM tables, KaTeX, mermaid, sanitized SVG |
-| `MediaPreview` | Images inline, a download link for everything else | Image, audio, video, PDF, download fallback |
+| `MediaPreview` | Image cards (see [Media](#media)), a download link for everything else | Audio, video and PDF previews |
 
 ## License
 

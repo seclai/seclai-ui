@@ -16,7 +16,7 @@ import {
 } from "./attachments";
 import { createEndpoints, uploadFile } from "./endpoints";
 import { MarkdownContent } from "./placeholders/MarkdownContent";
-import { MediaPreview } from "./placeholders/MediaPreview";
+import { MediaGallery } from "./media/MediaGallery";
 import type { AgentAttachment, AgentEndpointOptions } from "./types";
 import { useAgentRun } from "./useAgentRun";
 
@@ -160,9 +160,9 @@ function Turn({ turn, previews }: { turn: ChatTurn; previews: Map<string, string
         </ul>
       )}
       {turn.text && <MarkdownContent content={turn.text} />}
-      {turn.attachments?.map((attachment) => (
-        <MediaPreview key={attachment.id} attachment={attachment} />
-      ))}
+      {turn.attachments && turn.attachments.length > 0 && (
+        <MediaGallery attachments={turn.attachments} />
+      )}
       {turn.error && (
         <p className="seclai-error" role="alert">
           {turn.error}
