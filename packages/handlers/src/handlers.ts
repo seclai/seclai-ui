@@ -4,8 +4,10 @@ import {
   type AcceptedAttachmentSlot,
   type ApiVersion,
 } from "@seclai/sdk";
-import { json, jsonError, toErrorResponse } from "./errors";
+import { errorLogFields, json, jsonError, toErrorResponse } from "./errors";
+import { safeLogger, type SeclaiLogger } from "./logger";
 import { createRunObserver, type RunEndCallback, type RunEventCallback } from "./run-callbacks";
+import { startRunLog } from "./run-log";
 import { relayRunEvents, SSE_HEADERS } from "./sse";
 
 /**
@@ -167,11 +169,19 @@ export interface SeclaiHandlersOptions<Ctx = undefined> {
    * nothing to read the rest of the run for.
    */
   keepReadingAfterDisconnect?: boolean;
+  /**
+   * Receives log lines about runs, uploads and downloads, with ids, timings and
+   * counts in `fields`. `console` works. Never given the API key, the input
+   * text or file contents. Without one, nothing is logged, and the few errors
+   * the handlers report themselves go to `console`.
+   */
+  logger?: SeclaiLogger;
 
   // Access control. The hooks also apply through `handle`. Each may refuse by
   // returning or throwing a `Response` (see `deny`). If one throws anything
   // else, the request gets a 500 with a generic message and the error is
-  // logged with `console.error`; it is never sent to the browser.
+  // logged (to `logger`, or `console.error` without one); it is never sent to
+  // the browser.
   /**
    * Your app's per-request context (for example the signed-in user), passed to
    * each hook as its last argument. Called only when a hook is about to run.
@@ -397,6 +407,20 @@ export function createSeclaiHandlers<Ctx>(
     authorizeDownload,
   } = options;
   const { maxBytes, checkContentType = false, onUpload } = uploadOptions;
+  const logger = options.logger && safeLogger(options.logger, apiKey);
+
+  /** The handlers' own error reports: to the logger when there is one, else to `console`. */
+  function reportError(message: string, err?: unknown) {
+    if (logger) logger.error(message, err === undefined ? undefined : errorLogFields(err));
+    else if (err === undefined) console.error(`[seclai] ${message}`);
+    else console.error(`[seclai] ${message}`, err);
+  }
+
+  /** Log a request the handlers or a hook refused, and pass the response on. */
+  function refused(what: string, res: Response, fields: Record<string, unknown> = {}): Response {
+    logger?.info(`${what} refused`, { ...fields, status: res.status });
+    return res;
+  }
 
   // Without a key the SDK would go looking for credentials in ~/.seclai.
   if (!apiKey) throw new Error("createSeclaiHandlers: `apiKey` is required.");
@@ -463,7 +487,7 @@ export function createSeclaiHandlers<Ctx>(
         ctx === undefined && err instanceof TypeError
           ? " No context was passed: set the `context` option, or call `withContext(ctx)`."
           : "";
-      console.error(`[seclai] ${name} threw, so the request got a 500.${hint}`, err);
+      reportError(`${name} threw, so the request got a 500.${hint}`, err);
       return { response: jsonError(500, NOT_AUTHORIZED) };
     }
   }
@@ -488,13 +512,13 @@ export function createSeclaiHandlers<Ctx>(
         const bodyLimit = maxBytes === undefined ? undefined : maxBytes + MULTIPART_OVERHEAD_BYTES;
         if (bodyLimit !== undefined) {
           const length = Number(req.headers.get("content-length"));
-          if (length > bodyLimit) return tooLarge();
+          if (length > bodyLimit) return refused("upload", tooLarge(), { content_length: length });
         }
 
         let form: FormData;
         try {
           const read = bodyLimit === undefined ? await req.formData() : await readLimitedForm(req, bodyLimit);
-          if (read === "too-large") return tooLarge();
+          if (read === "too-large") return refused("upload", tooLarge(), { reason: "body over limit" });
           form = read;
         } catch {
           return jsonError(400, "The request body must be multipart form data.");
@@ -504,18 +528,24 @@ export function createSeclaiHandlers<Ctx>(
         if (file === null || typeof file === "string") {
           return jsonError(400, "The form must include a `file` field holding a file.");
         }
-        if (maxBytes !== undefined && file.size > maxBytes) return tooLarge();
+
+        const started = Date.now();
+        const fileFields = { name: file.name, type: file.type || undefined, size: file.size };
+        logger?.info("upload received", fileFields);
+        if (maxBytes !== undefined && file.size > maxBytes) return refused("upload", tooLarge(), fileFields);
 
         if (authorizeUpload) {
           const result = await callHook("authorizeUpload", req, resolveCtx, (ctx) =>
             authorizeUpload(req, file, ctx),
           );
-          if ("response" in result) return result.response;
+          if ("response" in result) return refused("upload", result.response, fileFields);
           const allowed = result.value;
-          if (allowed instanceof Response) return allowed;
-          if (allowed === false) return jsonError(403, "This upload isn't allowed.");
+          if (allowed instanceof Response) return refused("upload", allowed, fileFields);
+          if (allowed === false) return refused("upload", jsonError(403, "This upload isn't allowed."), fileFields);
           if (allowed !== undefined && allowed !== true) {
-            console.error("[seclai] authorizeUpload returned something other than true, false, nothing or a Response, so the request got a 500.", allowed);
+            reportError(
+              `authorizeUpload returned ${String(allowed)}, not true, false, nothing or a Response, so the request got a 500.`,
+            );
             return jsonError(500, NOT_AUTHORIZED);
           }
         }
@@ -529,7 +559,7 @@ export function createSeclaiHandlers<Ctx>(
           if (checkContentType && !UNKNOWN_TYPES.has(type)) {
             const accepted = await attachmentSlots();
             if (!accepted.some((slot) => slotAllows(slot, type))) {
-              return jsonError(415, `This agent does not accept files of type ${type}.`);
+              return refused("upload", jsonError(415, `This agent does not accept files of type ${type}.`), fileFields);
             }
           }
 
@@ -545,16 +575,31 @@ export function createSeclaiHandlers<Ctx>(
             content_type: upload.content_type,
             file_size: upload.file_size,
           };
+          logger?.info("uploaded", {
+            ...fileFields,
+            upload_id: upload.id,
+            status: upload.status,
+            ms: Date.now() - started,
+          });
         } catch (err) {
-          return toErrorResponse(err);
+          const res = toErrorResponse(err);
+          logger?.error("upload failed", {
+            ...fileFields,
+            status: res.status,
+            ...errorLogFields(err),
+            ms: Date.now() - started,
+          });
+          return res;
         }
 
         if (onUpload) {
           try {
             const replacement = await onUpload(file, result, req);
             if (replacement instanceof Response) return replacement;
-          } catch {
-            // The app's own error: its message could hold anything, so it stays here.
+          } catch (err) {
+            // The app's own error: its message could hold anything, so it stays
+            // out of the response, and only reaches the server's log.
+            reportError("onUpload threw, so the request got a 500.", err);
             return jsonError(500, "The server failed to finish handling the upload.");
           }
         }
@@ -578,10 +623,10 @@ export function createSeclaiHandlers<Ctx>(
           const result = await callHook("authorizeRun", req, resolveCtx, (ctx) =>
             authorizeRun(req, parsed, ctx),
           );
-          if ("response" in result) return result.response;
+          if ("response" in result) return refused("run", result.response);
           const verdict = result.value;
-          if (verdict instanceof Response) return verdict;
-          if (verdict === false) return jsonError(403, "This request isn't allowed.");
+          if (verdict instanceof Response) return refused("run", verdict);
+          if (verdict === false) return refused("run", jsonError(403, "This request isn't allowed."));
           // A bad rewrite is the app's bug, not the browser's: a 500 with the
           // same generic message as a throw, and the reason in the server log.
           // The body is validated again even when the hook returned nothing,
@@ -589,10 +634,10 @@ export function createSeclaiHandlers<Ctx>(
           const kept = verdict === undefined || verdict === true;
           const rewritten = parseRunBody(kept ? parsed : verdict);
           if (typeof rewritten === "string") {
-            console.error(
+            reportError(
               kept
-                ? `[seclai] authorizeRun changed the body in place to one that isn't valid, so the request got a 500: ${rewritten}`
-                : `[seclai] authorizeRun returned a body that isn't valid, so the request got a 500: ${rewritten}`,
+                ? `authorizeRun changed the body in place to one that isn't valid, so the request got a 500: ${rewritten}`
+                : `authorizeRun returned a body that isn't valid, so the request got a 500: ${rewritten}`,
             );
             return jsonError(500, NOT_AUTHORIZED);
           }
@@ -605,6 +650,17 @@ export function createSeclaiHandlers<Ctx>(
         // Kept reading, the run isn't tied to the browser's request: the relay
         // reads it to the end instead when the browser goes away.
         if (!keepReading) req.signal?.addEventListener("abort", abort, { once: true });
+
+        const log =
+          logger &&
+          startRunLog(logger, {
+            sessionId: body.sessionId,
+            uploads: body.uploadIds?.length ?? 0,
+            inputChars: body.input?.length ?? 0,
+            // Kept reading, the browser leaving doesn't stop the upstream, so a
+            // failure after it is a real one.
+            disconnected: () => !keepReading && (req.signal?.aborted ?? false),
+          });
 
         const events = client.runStreamingAgent(
           agentId,
@@ -620,10 +676,11 @@ export function createSeclaiHandlers<Ctx>(
           // A rejected run throws here, before any bytes are committed, so a bad
           // attachment or an empty credit balance can be a real HTTP error.
           const first = await events.next();
+          log?.opened(Boolean(first.done));
           // `body` is the one that ran: after any `authorizeRun` rewrite.
           const observer =
-            onEvent || onRunEnd
-              ? createRunObserver({ onEvent, onRunEnd }, { body, request: req }, { keepReading })
+            onEvent || onRunEnd || log
+              ? createRunObserver({ onEvent, onRunEnd, log }, { body, request: req }, { keepReading })
               : undefined;
           return new Response(
             relayRunEvents(
@@ -636,7 +693,11 @@ export function createSeclaiHandlers<Ctx>(
             { headers: SSE_HEADERS },
           );
         } catch (err) {
-          return toErrorResponse(err);
+          const res = toErrorResponse(err);
+          // The browser left while the stream was connecting, which aborted it.
+          if (!keepReading && req.signal?.aborted) log?.disconnected();
+          else log?.rejected(err, res.status);
+          return res;
         }
       },
 
@@ -662,17 +723,18 @@ export function createSeclaiHandlers<Ctx>(
           const result = await callHook("authorizeDownload", req, resolveCtx, (ctx) =>
             authorizeDownload(req, { runId, attachmentId }, ctx),
           );
-          if ("response" in result) return result.response;
+          const ids = { run_id: runId, attachment_id: attachmentId };
+          if ("response" in result) return refused("download", result.response, ids);
           const allowed = result.value;
-          if (allowed instanceof Response) return allowed;
+          if (allowed instanceof Response) return refused("download", allowed, ids);
           if (allowed !== true && allowed !== false && !warnedDownloadResult) {
             warnedDownloadResult = true;
-            console.warn(
-              `[seclai] authorizeDownload returned ${String(allowed)}, not true or false, so the download was refused with a 404. Return true to serve the file.`,
-            );
+            const warning = `authorizeDownload returned ${String(allowed)}, not true or false, so the download was refused with a 404. Return true to serve the file.`;
+            if (logger) logger.warn(warning);
+            else console.warn(`[seclai] ${warning}`);
           }
           // A 404, not a 403, so a refusal does not confirm that the ids exist.
-          if (allowed !== true) return jsonError(404, "Not found.");
+          if (allowed !== true) return refused("download", jsonError(404, "Not found."), ids);
         }
 
         try {
@@ -701,9 +763,22 @@ export function createSeclaiHandlers<Ctx>(
             headers.set("content-security-policy", "sandbox; default-src 'none'");
           }
 
+          logger?.info("download served", {
+            run_id: runId,
+            attachment_id: attachmentId,
+            status: upstream.status,
+            content_type: contentType,
+          });
           return new Response(upstream.body, { status: upstream.status, headers });
         } catch (err) {
-          return toErrorResponse(err);
+          const res = toErrorResponse(err);
+          logger?.error("download failed", {
+            run_id: runId,
+            attachment_id: attachmentId,
+            status: res.status,
+            ...errorLogFields(err),
+          });
+          return res;
         }
       },
     };

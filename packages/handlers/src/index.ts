@@ -19,6 +19,8 @@ export type {
   UploadResult,
   WithContext,
 } from "./handlers";
+export { consoleLogger } from "./logger";
+export type { SeclaiLogFields, SeclaiLogger, SeclaiLogLevel } from "./logger";
 export type {
   RunCallbackContext,
   RunEndCallback,
