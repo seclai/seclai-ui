@@ -9,8 +9,10 @@ export { AgentRunForm, type AgentRunFormProps } from "./AgentRunForm";
 export { SeclaiAgent, type SeclaiAgentProps } from "./SeclaiAgent";
 export {
   useAgentRun,
+  type AgentRunEvent,
   type AgentRunState,
   type StartRunOptions,
+  type UseAgentRunOptions,
   type UseAgentRunResult,
 } from "./useAgentRun";
 export {
