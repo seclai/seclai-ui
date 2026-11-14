@@ -1,13 +1,28 @@
-export { AgentChat, type AgentChatProps } from "./AgentChat";
+export {
+  AgentChat,
+  type AgentChatAttachButton,
+  type AgentChatFile,
+  type AgentChatMessage,
+  type AgentChatProps,
+} from "./AgentChat";
 export { AgentRunForm, type AgentRunFormProps } from "./AgentRunForm";
 export { SeclaiAgent, type SeclaiAgentProps } from "./SeclaiAgent";
 export {
   useAgentRun,
+  type AgentRunEvent,
   type AgentRunState,
   type StartRunOptions,
+  type UseAgentRunOptions,
   type UseAgentRunResult,
 } from "./useAgentRun";
-export { DEFAULT_BASE_PATH } from "./endpoints";
+export {
+  DEFAULT_BASE_PATH,
+  createEndpoints,
+  fetchAttachmentReferences,
+  uploadFile,
+  type AgentEndpoints,
+  type EndpointRequestOptions,
+} from "./endpoints";
 export type {
   AcceptedAttachmentSlot,
   AgentAttachment,
