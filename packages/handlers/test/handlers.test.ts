@@ -1,13 +1,18 @@
 import { SeclaiAPIStatusError, SeclaiStreamingError, type AgentRunEvent } from "@seclai/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ATTACHMENT_SLOTS_TTL_MS,
   consoleLogger,
   createSeclaiHandlers,
+  deny,
   type RunCallbackContext,
   type RunEvent,
   type RunOutcome,
+  type RunRequestBody,
+  type SeclaiHandlers,
   type SeclaiHandlersOptions,
   type SeclaiLogger,
+  type SeclaiUploadOptions,
 } from "../src";
 import { createRunObserver } from "../src/run-callbacks";
 import { KEEPALIVE_INTERVAL_MS, relayRunEvents } from "../src/sse";
@@ -213,6 +218,286 @@ describe("upload", () => {
       new Request(`${URL_BASE}/upload`, { method: "POST", body: "{}" }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("upload options", () => {
+  const UPLOADED = {
+    id: "up-1",
+    status: "ready",
+    filename: "a.png",
+    content_type: "image/png",
+    file_size: 5,
+  };
+
+  const withUpload = (upload: SeclaiUploadOptions) =>
+    createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, upload });
+
+  function uploadRequest(file: File, headers?: HeadersInit) {
+    const form = new FormData();
+    form.set("file", file);
+    return new Request(`${URL_BASE}/upload`, { method: "POST", body: form, headers });
+  }
+
+  const png = (body = "hello") => new File([body], "a.png", { type: "image/png" });
+
+  function slots(...accepted: Array<{ name: string; content_types?: string[] }>) {
+    client.getAgentAttachmentReferences.mockResolvedValue({
+      requires_uploads: accepted.length > 0,
+      accepted_attachments: accepted.map((slot) => ({ min: 0, ...slot })),
+    });
+  }
+
+  beforeEach(() => {
+    client.uploadAgentInput.mockResolvedValue(UPLOADED);
+  });
+
+  it("rejects maxBytes other than a positive number", () => {
+    for (const maxBytes of [0, -1, Number.NaN, Infinity]) {
+      expect(() => withUpload({ maxBytes })).toThrow(/maxBytes/);
+    }
+  });
+
+  describe("maxBytes", () => {
+    it("refuses an oversized body from its content-length without reading it", async () => {
+      const req = uploadRequest(png(), { "content-length": String(10 * 1024 * 1024) });
+      const formData = vi.spyOn(req, "formData");
+
+      const res = await withUpload({ maxBytes: 1024 * 1024 }).upload(req);
+
+      expect(res.status).toBe(413);
+      expect(await res.json()).toEqual({
+        error: "The file is larger than the 1048576-byte limit.",
+        status: 413,
+      });
+      expect(formData).not.toHaveBeenCalled();
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("stops reading a chunked body without content-length once it passes the limit", async () => {
+      const boundary = "limit-test";
+      const encoder = new TextEncoder();
+      const chunk = new Uint8Array(16 * 1024).fill(97);
+      const totalChunks = 200; // 3.2 MB, far over 1 KB + the 64 KB envelope
+      let sent = 0;
+      let cancelled = false;
+      const source = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent === 0) {
+            controller.enqueue(
+              encoder.encode(
+                `--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="a.bin"\r\n` +
+                  "content-type: application/octet-stream\r\n\r\n",
+              ),
+            );
+          }
+          if (sent === totalChunks) {
+            controller.enqueue(encoder.encode(`\r\n--${boundary}--\r\n`));
+            controller.close();
+            return;
+          }
+          sent++;
+          controller.enqueue(chunk);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const req = new Request(`${URL_BASE}/upload`, {
+        method: "POST",
+        headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+        body: source,
+        duplex: "half",
+      } as RequestInit);
+      expect(req.headers.get("content-length")).toBeNull();
+
+      const res = await withUpload({ maxBytes: 1024 }).upload(req);
+
+      expect(res.status).toBe(413);
+      expect(await res.json()).toEqual({
+        error: "The file is larger than the 1024-byte limit.",
+        status: 413,
+      });
+      expect(cancelled).toBe(true);
+      expect(sent).toBeLessThan(totalChunks);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("refuses a file over the limit by its actual size", async () => {
+      const res = await withUpload({ maxBytes: 4 }).upload(uploadRequest(png("hello")));
+      expect(res.status).toBe(413);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("accepts a file at the limit, leaving room for the multipart envelope", async () => {
+      const res = await withUpload({ maxBytes: 5 }).upload(
+        uploadRequest(png("hello"), { "content-length": "400" }),
+      );
+      expect(res.status).toBe(200);
+      expect(client.uploadAgentInput).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("checkContentType", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("uploads a file a slot allows", async () => {
+      slots(
+        { name: "doc", content_types: ["application/pdf"] },
+        { name: "photo", content_types: ["image/png"] },
+      );
+      const res = await withUpload({ checkContentType: true }).upload(uploadRequest(png()));
+      expect(res.status).toBe(200);
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledWith(AGENT);
+      expect(client.uploadAgentInput).toHaveBeenCalledOnce();
+    });
+
+    it("refuses a file no slot allows without calling the upload API", async () => {
+      slots({ name: "doc", content_types: ["application/pdf"] });
+      const res = await withUpload({ checkContentType: true }).upload(uploadRequest(png()));
+      expect(res.status).toBe(415);
+      expect(await res.json()).toEqual({
+        error: "This agent does not accept files of type image/png.",
+        status: 415,
+      });
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a type wildcard", ["image/*"], "image/png", true],
+      ["a type wildcard for another type", ["image/*"], "text/plain", false],
+      ["a wildcard without its slash", ["image/*"], "imagery/png", false],
+      ["a full wildcard", ["*/*"], "text/plain", true],
+      ["different case", ["Image/PNG"], "image/png", true],
+      ["parameters on the file's type", ["text/plain"], "text/plain;charset=utf-8", true],
+      ["a slot without types", [], "application/x-anything", true],
+      ["a typeless file and a typed slot", ["image/*"], "", true],
+      ["a typeless file and an any-type slot", [], "", true],
+      ["an octet-stream file and a typed slot", ["image/*"], "application/octet-stream", true],
+    ])("handles %s", async (_label, contentTypes, fileType, allowed) => {
+      slots({ name: "files", content_types: contentTypes });
+      const res = await withUpload({ checkContentType: true }).upload(
+        uploadRequest(new File(["x"], "f", { type: fileType })),
+      );
+      expect(res.status).toBe(allowed ? 200 : 415);
+    });
+
+    it("leaves a file without a type to the API, without looking up the slots", async () => {
+      slots();
+      const res = await withUpload({ checkContentType: true }).upload(
+        uploadRequest(new File(["# notes"], "notes.md", { type: "" })),
+      );
+      expect(res.status).toBe(200);
+      expect(client.getAgentAttachmentReferences).not.toHaveBeenCalled();
+      expect(client.uploadAgentInput).toHaveBeenCalledOnce();
+    });
+
+    it("refuses every typed file when the agent declares no slots", async () => {
+      slots();
+      const res = await withUpload({ checkContentType: true }).upload(uploadRequest(png()));
+      expect(res.status).toBe(415);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("looks the slots up once within the TTL, and again after it", async () => {
+      vi.useFakeTimers();
+      slots({ name: "photo", content_types: ["image/*"] });
+      const seclai = withUpload({ checkContentType: true });
+
+      await seclai.upload(uploadRequest(png()));
+      await seclai.upload(uploadRequest(png()));
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledOnce();
+      expect(client.uploadAgentInput).toHaveBeenCalledTimes(2);
+
+      vi.advanceTimersByTime(ATTACHMENT_SLOTS_TTL_MS);
+      await seclai.upload(uploadRequest(png()));
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+    });
+
+    it("refuses the upload when the lookup fails, and retries on the next one", async () => {
+      client.getAgentAttachmentReferences.mockRejectedValueOnce(new Error("secret-key down"));
+      const seclai = withUpload({ checkContentType: true });
+
+      const res = await seclai.upload(uploadRequest(png()));
+      expect(res.status).toBe(502);
+      expect(await res.text()).not.toContain("secret-key");
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+
+      slots({ name: "photo", content_types: ["image/*"] });
+      expect((await seclai.upload(uploadRequest(png()))).status).toBe(200);
+      expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+    });
+
+    it("checks the size before looking up the slots", async () => {
+      const res = await withUpload({ maxBytes: 1, checkContentType: true }).upload(
+        uploadRequest(png()),
+      );
+      expect(res.status).toBe(413);
+      expect(client.getAgentAttachmentReferences).not.toHaveBeenCalled();
+    });
+
+    it("is off by default", async () => {
+      expect((await handlers().upload(uploadRequest(png()))).status).toBe(200);
+      expect(client.getAgentAttachmentReferences).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("onUpload", () => {
+    it("receives the file, result and request, and keeps the default response", async () => {
+      const onUpload = vi.fn();
+      const req = uploadRequest(png());
+
+      const res = await withUpload({ onUpload }).upload(req);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(UPLOADED);
+      const [file, result, passed] = onUpload.mock.calls[0]!;
+      expect(await (file as File).text()).toBe("hello");
+      expect((file as File).name).toBe("a.png");
+      expect(result).toEqual(UPLOADED);
+      expect(passed).toBe(req);
+    });
+
+    it("replaces the response with one it returns", async () => {
+      const res = await withUpload({
+        onUpload: async (_file, result) =>
+          Response.json({ id: result.id, url: "/files/1" }, { status: 201 }),
+      }).upload(uploadRequest(png()));
+
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: "up-1", url: "/files/1" });
+    });
+
+    it("turns a throw into a 500 without leaking its message", async () => {
+      const res = await withUpload({
+        onUpload: () => {
+          throw new Error("db password is hunter2");
+        },
+      }).upload(uploadRequest(png()));
+
+      expect(res.status).toBe(500);
+      const text = await res.text();
+      expect(JSON.parse(text).status).toBe(500);
+      expect(text).not.toContain("hunter2");
+    });
+
+    it("is not called when the upload fails", async () => {
+      client.uploadAgentInput.mockRejectedValue(statusError(400));
+      const onUpload = vi.fn();
+      const res = await withUpload({ onUpload }).upload(uploadRequest(png()));
+      expect(res.status).toBe(400);
+      expect(onUpload).not.toHaveBeenCalled();
+    });
+
+    it("is not called when a file is refused", async () => {
+      slots({ name: "doc", content_types: ["application/pdf"] });
+      const onUpload = vi.fn();
+      const res = await withUpload({ checkContentType: true, onUpload }).upload(
+        uploadRequest(png()),
+      );
+      expect(res.status).toBe(415);
+      expect(onUpload).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -949,7 +1234,7 @@ describe("keepReadingAfterDisconnect", () => {
     data: { run_id: RUN, status: "completed", output: "Hi there", attachments: [{ id: "a1", name: "x.png", mime: "image/png" }] },
   };
 
-  function setup(opts: Partial<SeclaiHandlersOptions> = {}) {
+  function setup(opts: Partial<Omit<SeclaiHandlersOptions, "context">> = {}) {
     const up = upstream();
     client.runStreamingAgent.mockImplementation(up.events);
     const outcomes: RunOutcome[] = [];
@@ -1269,6 +1554,575 @@ describe("download", () => {
   });
 });
 
+describe("authorizeRun", () => {
+  const withHook = (authorizeRun: SeclaiHandlersOptions["authorizeRun"]) =>
+    createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, authorizeRun });
+  let consoleError: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    client.runStreamingAgent.mockReturnValue(eventsOf({ event: "done", data: {} }));
+    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => consoleError.mockRestore());
+
+  it("receives the request and the validated body", async () => {
+    const hook = vi.fn((_req: Request, body: RunRequestBody) => body);
+    const req = runRequest({ input: "hi", uploadIds: ["a"], sessionId: "s1", extra: true });
+
+    const res = await withHook(hook).run(req);
+
+    expect(res.status).toBe(200);
+    expect(hook).toHaveBeenCalledOnce();
+    expect(hook.mock.calls[0]![0]).toBe(req);
+    // Unknown fields are already gone.
+    expect(hook.mock.calls[0]![1]).toEqual({ input: "hi", uploadIds: ["a"], sessionId: "s1" });
+    expect(client.runStreamingAgent.mock.calls[0]![1]).toEqual({
+      input: "hi",
+      input_upload_ids: ["a"],
+      metadata: { session_id: "s1" },
+    });
+  });
+
+  it("returns a refusal Response as-is, without calling the API", async () => {
+    const refusal = new Response("nope", { status: 403 });
+    const res = await withHook(() => refusal).run(runRequest({ input: "hi", sessionId: "s1" }));
+
+    expect(res).toBe(refusal);
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+  });
+
+  it("runs a rewritten body", async () => {
+    await withHook((_req, body) => ({
+      ...body,
+      input: `${body.input}\n\nThe first upload is the logo.`,
+      uploadIds: ["server-side"],
+    })).run(runRequest({ input: "hi", uploadIds: ["a"] }));
+
+    expect(client.runStreamingAgent.mock.calls[0]![1]).toEqual({
+      input: "hi\n\nThe first upload is the logo.",
+      input_upload_ids: ["server-side"],
+    });
+  });
+
+  it("drops unknown fields a rewrite adds", async () => {
+    await withHook((_req, body) => ({ ...body, agentId: "other" }) as RunRequestBody).run(
+      runRequest({ input: "hi" }),
+    );
+    expect(client.runStreamingAgent).toHaveBeenCalledOnce();
+    expect(client.runStreamingAgent.mock.calls[0]![0]).toBe(AGENT);
+    expect(client.runStreamingAgent.mock.calls[0]![1]).toEqual({ input: "hi" });
+  });
+
+  it.each([
+    ["an empty body", {}],
+    ["a non-string input", { input: 1 }],
+    ["an empty session id", { input: "x", sessionId: "" }],
+    ["null", null],
+    ["a string", "ok"],
+  ])("returns a 500 for a rewrite to %s, and logs why", async (_label, rewrite) => {
+    const res = await withHook(() => rewrite as RunRequestBody).run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Could not authorize this request.", status: 500 });
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(String(consoleError.mock.calls[0]![0])).toMatch(/authorizeRun returned a body that isn't valid/);
+  });
+
+  it("validates the body again when the hook changes it in place and returns nothing", async () => {
+    const res = await withHook((_req, body) => {
+      (body as Record<string, unknown>).uploadIds = null;
+      delete body.input;
+    }).run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(500);
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+    expect(String(consoleError.mock.calls[0]![0])).toMatch(/changed the body in place/);
+  });
+
+  it("runs a body the hook changed in place, when it's still valid", async () => {
+    await withHook((_req, body) => {
+      body.sessionId = "from-db";
+    }).run(runRequest({ input: "hi" }));
+
+    expect(client.runStreamingAgent.mock.calls[0]![1]).toEqual({
+      input: "hi",
+      metadata: { session_id: "from-db" },
+    });
+  });
+
+  it("logs the validation reason for a bad rewrite", async () => {
+    await withHook(() => ({ input: 1 }) as unknown as RunRequestBody).run(runRequest({ input: "hi" }));
+    expect(String(consoleError.mock.calls[0]![0])).toContain("`input` must be a string.");
+  });
+
+  it.each([
+    ["nothing", () => {}],
+    ["undefined from an async hook", async () => undefined],
+    ["true", () => true],
+  ])("runs the body unchanged when the hook returns %s", async (_label, hook) => {
+    const res = await withHook(hook).run(runRequest({ input: "hi", sessionId: "s1" }));
+
+    expect(res.status).toBe(200);
+    expect(client.runStreamingAgent.mock.calls[0]![1]).toEqual({
+      input: "hi",
+      metadata: { session_id: "s1" },
+    });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("returns a 403 for false, without calling the API", async () => {
+    const res = await withHook(() => false).run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "This request isn't allowed.", status: 403 });
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+  });
+
+  it("treats a thrown Response as a refusal, without logging it", async () => {
+    const res = await withHook(() => {
+      throw deny(403, "That isn't your conversation.");
+    }).run(runRequest({ input: "hi", sessionId: "someone-elses" }));
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "That isn't your conversation.", status: 403 });
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("awaits an async hook", async () => {
+    const res = await withHook(async (_req, body) => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return { ...body, sessionId: "from-db" };
+    }).run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(200);
+    expect(client.runStreamingAgent.mock.calls[0]![1]).toEqual({
+      input: "hi",
+      metadata: { session_id: "from-db" },
+    });
+  });
+
+  it("awaits an async refusal", async () => {
+    const res = await withHook(async () => new Response(null, { status: 401 })).run(
+      runRequest({ input: "hi" }),
+    );
+    expect(res.status).toBe(401);
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["throws", () => {
+      throw new Error("db password is hunter2");
+    }],
+    ["rejects", async () => {
+      throw new Error("db password is hunter2");
+    }],
+  ])("returns a 500 without the message when the hook %s, and logs the error", async (_label, hook) => {
+    const res = await withHook(hook).run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(await res.text()).not.toContain("hunter2");
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(consoleError.mock.calls[0]![0]).toBe("[seclai] authorizeRun threw, so the request got a 500.");
+    expect((consoleError.mock.calls[0]![1] as Error).message).toBe("db password is hunter2");
+  });
+
+  it("is not called for a body that fails validation", async () => {
+    const hook = vi.fn((_req: Request, body: RunRequestBody) => body);
+    const res = await withHook(hook).run(runRequest({}));
+    expect(res.status).toBe(400);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("is not called for the wrong method", async () => {
+    const hook = vi.fn((_req: Request, body: RunRequestBody) => body);
+    const res = await withHook(hook).run(new Request(`${URL_BASE}/run`));
+    expect(res.status).toBe(405);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("applies through handle", async () => {
+    const res = await withHook(() => new Response(null, { status: 403 })).handle(
+      runRequest({ input: "hi" }),
+    );
+    expect(res.status).toBe(403);
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("authorizeDownload", () => {
+  const withHook = (authorizeDownload: SeclaiHandlersOptions["authorizeDownload"]) =>
+    createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, authorizeDownload });
+  const downloadRequest = (attachmentId = "abc") =>
+    new Request(`${URL_BASE}/download?${new URLSearchParams({ runId: RUN, attachmentId })}`);
+  let consoleError: ReturnType<typeof vi.spyOn>;
+  let consoleWarn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    client.downloadAgentRunAttachment.mockImplementation(
+      async () => new Response("bytes", { headers: { "content-type": "text/plain" } }),
+    );
+    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleError.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("serves the file when the hook returns true, passing the request and ids", async () => {
+    const hook = vi.fn(() => true);
+    const req = downloadRequest();
+
+    const res = await withHook(hook).download(req);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("bytes");
+    expect(hook).toHaveBeenCalledWith(req, { runId: RUN, attachmentId: "abc" }, undefined);
+  });
+
+  it("returns a 404 for false, without calling the API", async () => {
+    const res = await withHook(() => false).download(downloadRequest());
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Not found.", status: 404 });
+    expect(client.downloadAgentRunAttachment).not.toHaveBeenCalled();
+  });
+
+  it("treats a missing return value as a refusal, and warns once", async () => {
+    const seclai = withHook((() => undefined) as unknown as () => boolean);
+    const first = await seclai.download(downloadRequest());
+    const second = await seclai.download(downloadRequest());
+
+    expect(first.status).toBe(404);
+    expect(second.status).toBe(404);
+    expect(client.downloadAgentRunAttachment).not.toHaveBeenCalled();
+    expect(consoleWarn).toHaveBeenCalledOnce();
+    expect(String(consoleWarn.mock.calls[0]![0])).toMatch(/returned undefined.*Return true to serve the file/);
+  });
+
+  it("doesn't warn for an explicit false", async () => {
+    await withHook(() => false).download(downloadRequest());
+    expect(consoleWarn).not.toHaveBeenCalled();
+  });
+
+  it("treats a thrown Response as a refusal", async () => {
+    const res = await withHook(() => {
+      throw deny(401, "Sign in to download.");
+    }).download(downloadRequest());
+    expect(res.status).toBe(401);
+    expect(client.downloadAgentRunAttachment).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("returns a refusal Response as-is, without calling the API", async () => {
+    const refusal = new Response("sign in", { status: 401 });
+    const res = await withHook(() => refusal).download(downloadRequest());
+
+    expect(res).toBe(refusal);
+    expect(client.downloadAgentRunAttachment).not.toHaveBeenCalled();
+  });
+
+  it("awaits an async hook", async () => {
+    const serve = await withHook(async () => true).download(downloadRequest());
+    expect(serve.status).toBe(200);
+
+    const refuse = await withHook(async () => false).download(downloadRequest());
+    expect(refuse.status).toBe(404);
+    expect(client.downloadAgentRunAttachment).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["throws", () => {
+      throw new Error("db password is hunter2");
+    }],
+    ["rejects", async () => {
+      throw new Error("db password is hunter2");
+    }],
+  ])("returns a 500 without the message when the hook %s", async (_label, hook) => {
+    const res = await withHook(hook).download(downloadRequest());
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain("hunter2");
+    expect(client.downloadAgentRunAttachment).not.toHaveBeenCalled();
+  });
+
+  it("is not called for malformed ids", async () => {
+    const hook = vi.fn(() => true);
+    const res = await withHook(hook).download(downloadRequest("../../agents/x"));
+    expect(res.status).toBe(400);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("applies through handle", async () => {
+    const res = await withHook(() => false).handle(downloadRequest());
+    expect(res.status).toBe(404);
+    expect(client.downloadAgentRunAttachment).not.toHaveBeenCalled();
+  });
+});
+
+describe("authorizeUpload", () => {
+  const withHook = (authorizeUpload: SeclaiHandlersOptions["authorizeUpload"]) =>
+    createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, authorizeUpload });
+  const uploadRequest = (name = "a.png") => {
+    const form = new FormData();
+    form.set("file", new File(["png"], name, { type: "image/png" }));
+    return new Request(`${URL_BASE}/upload`, { method: "POST", body: form });
+  };
+  let consoleError: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    client.uploadAgentInput.mockResolvedValue({
+      id: "up-1",
+      status: "ready",
+      filename: "a.png",
+      content_type: "image/png",
+      file_size: 3,
+    });
+    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => consoleError.mockRestore());
+
+  it("receives the request and the file, and uploads when it returns nothing", async () => {
+    const hook = vi.fn((_req: Request, _file: File) => {});
+    const req = uploadRequest("me.png");
+
+    const res = await withHook(hook).upload(req);
+
+    expect(res.status).toBe(200);
+    expect(hook.mock.calls[0]![0]).toBe(req);
+    expect((hook.mock.calls[0]![1] as File).name).toBe("me.png");
+    expect(client.uploadAgentInput).toHaveBeenCalledOnce();
+  });
+
+  it("uploads when it returns true", async () => {
+    expect((await withHook(() => true).upload(uploadRequest())).status).toBe(200);
+  });
+
+  it("returns a 403 for false, without uploading", async () => {
+    const res = await withHook(() => false).upload(uploadRequest());
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "This upload isn't allowed.", status: 403 });
+    expect(client.uploadAgentInput).not.toHaveBeenCalled();
+  });
+
+  it("returns a refusal Response, returned or thrown, without uploading", async () => {
+    const returned = await withHook(() => deny(413, "Too big.")).upload(uploadRequest());
+    const thrown = await withHook(() => {
+      throw deny(409, "One headshot per session.");
+    }).upload(uploadRequest());
+
+    expect(returned.status).toBe(413);
+    expect(thrown.status).toBe(409);
+    expect(await thrown.json()).toEqual({ error: "One headshot per session.", status: 409 });
+    expect(client.uploadAgentInput).not.toHaveBeenCalled();
+  });
+
+  it("returns a logged 500 when the hook throws", async () => {
+    const res = await withHook(() => {
+      throw new Error("db password is hunter2");
+    }).upload(uploadRequest());
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain("hunter2");
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(client.uploadAgentInput).not.toHaveBeenCalled();
+  });
+
+  it("returns a logged 500 for a return value it doesn't understand", async () => {
+    const res = await withHook((() => "yes") as unknown as () => boolean).upload(uploadRequest());
+    expect(res.status).toBe(500);
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(client.uploadAgentInput).not.toHaveBeenCalled();
+  });
+
+  it("is not called when the form has no file", async () => {
+    const hook = vi.fn(() => true);
+    const res = await withHook(hook).upload(
+      new Request(`${URL_BASE}/upload`, { method: "POST", body: new FormData() }),
+    );
+    expect(res.status).toBe(400);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("applies through handle", async () => {
+    const res = await withHook(() => false).handle(uploadRequest());
+    expect(res.status).toBe(403);
+    expect(client.uploadAgentInput).not.toHaveBeenCalled();
+  });
+
+  describe("with the upload options", () => {
+    const withBoth = (
+      hook: SeclaiHandlersOptions["authorizeUpload"],
+      upload: SeclaiUploadOptions,
+    ) => createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, authorizeUpload: hook, upload });
+
+    it("checks maxBytes before calling the hook", async () => {
+      const hook = vi.fn(() => true);
+      const res = await withBoth(hook, { maxBytes: 2 }).upload(uploadRequest());
+      expect(res.status).toBe(413);
+      expect(hook).not.toHaveBeenCalled();
+    });
+
+    it("refuses before the content-type lookup", async () => {
+      const res = await withBoth(() => false, { checkContentType: true }).upload(uploadRequest());
+      expect(res.status).toBe(403);
+      expect(client.getAgentAttachmentReferences).not.toHaveBeenCalled();
+    });
+
+    it("still applies checkContentType once allowed", async () => {
+      client.getAgentAttachmentReferences.mockResolvedValue({
+        requires_uploads: true,
+        accepted_attachments: [{ name: "doc", min: 0, content_types: ["application/pdf"] }],
+      });
+      const res = await withBoth(() => true, { checkContentType: true }).upload(uploadRequest());
+      expect(res.status).toBe(415);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("calls onUpload only for an allowed upload", async () => {
+      const onUpload = vi.fn();
+      await withBoth(() => false, { onUpload }).upload(uploadRequest());
+      expect(onUpload).not.toHaveBeenCalled();
+
+      const res = await withBoth(() => true, { onUpload }).upload(uploadRequest());
+      expect(res.status).toBe(200);
+      expect(onUpload).toHaveBeenCalledOnce();
+    });
+  });
+});
+
+describe("hook context", () => {
+  type User = { userId: string };
+  let consoleError: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    client.runStreamingAgent.mockReturnValue(eventsOf({ event: "done", data: {} }));
+    client.downloadAgentRunAttachment.mockImplementation(async () => new Response("bytes"));
+    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => consoleError.mockRestore());
+
+  it("passes the `context` option's value to the hooks", async () => {
+    const context = vi.fn(async (req: Request): Promise<User> => ({
+      userId: req.headers.get("x-user") ?? "",
+    }));
+    const authorizeRun = vi.fn((_req: Request, _body: RunRequestBody, _ctx: User) => {});
+    const authorizeDownload = vi.fn((_req: Request, _ids: unknown, ctx: User) => ctx.userId === "u1");
+    const seclai = createSeclaiHandlers({ apiKey: "k", agentId: AGENT, context, authorizeRun, authorizeDownload });
+
+    await seclai.run(runRequest({ input: "hi" }, { headers: { "x-user": "u1" } }));
+    const download = await seclai.download(
+      new Request(`${URL_BASE}/download?runId=${RUN}&attachmentId=a`, { headers: { "x-user": "u1" } }),
+    );
+
+    expect(authorizeRun.mock.calls[0]![2]).toEqual({ userId: "u1" });
+    expect(download.status).toBe(200);
+    expect(context).toHaveBeenCalledTimes(2);
+  });
+
+  it("only resolves the context when a hook is about to run", async () => {
+    const context = vi.fn(async () => ({ userId: "u1" }));
+    const seclai = createSeclaiHandlers({ apiKey: "k", agentId: AGENT, context, authorizeRun: () => {} });
+
+    await seclai.run(runRequest({}));
+    await seclai.download(new Request(`${URL_BASE}/download?runId=${RUN}&attachmentId=a`));
+
+    expect(context).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the context throws a Response", async () => {
+    const seclai = createSeclaiHandlers({
+      apiKey: "k",
+      agentId: AGENT,
+      context: (): User => {
+        throw deny(401, "Sign in first.");
+      },
+      authorizeRun: () => {},
+    });
+
+    const res = await seclai.run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "Sign in first.", status: 401 });
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("returns a logged 500 when the context throws an error", async () => {
+    const seclai = createSeclaiHandlers({
+      apiKey: "k",
+      agentId: AGENT,
+      context: (): User => {
+        throw new Error("session store is down");
+      },
+      authorizeRun: () => {},
+    });
+
+    const res = await seclai.run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain("session store");
+    expect(consoleError).toHaveBeenCalledOnce();
+  });
+
+  it("withContext passes its value instead of calling the `context` option", async () => {
+    const context = vi.fn(async (): Promise<User> => ({ userId: "from-request" }));
+    const authorizeRun = vi.fn((_req: Request, _body: RunRequestBody, _ctx: User) => {});
+    const seclai = createSeclaiHandlers({ apiKey: "k", agentId: AGENT, context, authorizeRun });
+
+    const res = await seclai.withContext({ userId: "from-framework" }).handle(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(200);
+    expect(authorizeRun.mock.calls[0]![2]).toEqual({ userId: "from-framework" });
+    expect(context).not.toHaveBeenCalled();
+  });
+
+  it("withContext leaves the original handlers unbound", async () => {
+    const seen: (User | undefined)[] = [];
+    const seclai = createSeclaiHandlers<User | undefined>({
+      apiKey: "k",
+      agentId: AGENT,
+      authorizeRun: (_req, _body, ctx) => void seen.push(ctx),
+    });
+
+    await seclai.withContext({ userId: "u1" }).run(runRequest({ input: "hi" }));
+    client.runStreamingAgent.mockReturnValue(eventsOf({ event: "done", data: {} }));
+    await seclai.run(runRequest({ input: "hi" }));
+
+    expect(seen).toEqual([{ userId: "u1" }, undefined]);
+  });
+
+  it("hints at the missing context when a hook can't read it", async () => {
+    // TypeScript only offers withContext here; plain JavaScript can still call run.
+    const seclai = createSeclaiHandlers<User>({
+      apiKey: "k",
+      agentId: AGENT,
+      authorizeRun: (_req, _body, { userId }) => userId === "u1",
+    }) as unknown as SeclaiHandlers;
+
+    const res = await seclai.run(runRequest({ input: "hi" }));
+
+    expect(res.status).toBe(500);
+    expect(String(consoleError.mock.calls[0]![0])).toContain(
+      "No context was passed: set the `context` option, or call `withContext(ctx)`.",
+    );
+  });
+});
+
+describe("deny", () => {
+  it("builds the handlers' error JSON with optional headers", async () => {
+    const res = deny(429, "Slow down.", { "retry-after": "30" });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect(await res.json()).toEqual({ error: "Slow down.", status: 429 });
+  });
+});
+
 describe("handle", () => {
   it("routes by the last path segment", async () => {
     const refs = { requires_uploads: false, accepted_attachments: [] };
@@ -1324,7 +2178,7 @@ describe("logger", () => {
     return { logger, lines, summary, find };
   }
 
-  function withLogger(logger: SeclaiLogger, extra: Partial<SeclaiHandlersOptions> = {}) {
+  function withLogger(logger: SeclaiLogger, extra: Partial<Omit<SeclaiHandlersOptions, "context">> = {}) {
     return createSeclaiHandlers({ apiKey: API_KEY, agentId: AGENT, logger, ...extra });
   }
 
@@ -1924,6 +2778,91 @@ describe("logger", () => {
       "info run starting",
       "info browser disconnected; the run continues on Seclai",
     ]);
+  });
+
+  describe("with access control and upload options", () => {
+    const pngUpload = (body = "png") => {
+      const form = new FormData();
+      form.set("file", new File([body], "a.png", { type: "image/png" }));
+      return new Request(`${URL_BASE}/upload`, { method: "POST", body: form });
+    };
+    const download = () =>
+      new Request(`${URL_BASE}/download?runId=${RUN}&attachmentId=att-1`);
+
+    it("logs a run refused by authorizeRun, without running it", async () => {
+      const { logger, summary, find } = recorder();
+      const res = await withLogger(logger, { authorizeRun: () => false }).run(runRequest({ input: INPUT }));
+
+      expect(res.status).toBe(403);
+      expect(summary()).toEqual(["info run refused"]);
+      expect(find("run refused")![2]).toEqual({ status: 403 });
+      expect(client.runStreamingAgent).not.toHaveBeenCalled();
+    });
+
+    it("logs an upload refused by authorizeUpload, maxBytes or checkContentType", async () => {
+      const { logger, lines } = recorder();
+      await withLogger(logger, { authorizeUpload: () => false }).upload(pngUpload());
+      await withLogger(logger, { upload: { maxBytes: 2 } }).upload(pngUpload());
+      client.getAgentAttachmentReferences.mockResolvedValue({
+        requires_uploads: true,
+        accepted_attachments: [{ name: "doc", min: 0, content_types: ["application/pdf"] }],
+      });
+      await withLogger(logger, { upload: { checkContentType: true } }).upload(pngUpload());
+
+      const refusals = lines.filter(([, m]) => m === "upload refused").map(([level, , f]) => [level, f?.status]);
+      expect(refusals).toEqual([
+        ["info", 403],
+        ["info", 413],
+        ["info", 415],
+      ]);
+      expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    });
+
+    it("logs a download refused by authorizeDownload with its ids", async () => {
+      const { logger, find } = recorder();
+      const res = await withLogger(logger, { authorizeDownload: () => false }).download(download());
+
+      expect(res.status).toBe(404);
+      expect(find("download refused")![2]).toEqual({ run_id: RUN, attachment_id: "att-1", status: 404 });
+      expect(client.downloadAgentRunAttachment).not.toHaveBeenCalled();
+    });
+
+    it("sends hook and onUpload errors to the logger instead of console, with the API key scrubbed", async () => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { logger, lines } = recorder();
+      client.uploadAgentInput.mockResolvedValue({
+        id: "up-1",
+        status: "ready",
+        filename: "a.png",
+        content_type: "image/png",
+        file_size: 3,
+      });
+
+      const hookRes = await withLogger(logger, {
+        authorizeRun: () => {
+          throw new Error(`db down for ${API_KEY}`);
+        },
+      }).run(runRequest({ input: INPUT }));
+      const uploadRes = await withLogger(logger, {
+        upload: {
+          onUpload: () => {
+            throw new Error("storage full");
+          },
+        },
+      }).upload(pngUpload());
+
+      expect(hookRes.status).toBe(500);
+      expect(uploadRes.status).toBe(500);
+      const errors = lines.filter(([level]) => level === "error");
+      expect(errors.map(([, m]) => m)).toEqual([
+        "authorizeRun threw, so the request got a 500.",
+        "onUpload threw, so the request got a 500.",
+      ]);
+      expect(errors[0]![2]).toEqual({ error: "db down for [redacted]" });
+      expect(errors[1]![2]).toEqual({ error: "storage full" });
+      expect(consoleError).not.toHaveBeenCalled();
+      consoleError.mockRestore();
+    });
   });
 });
 

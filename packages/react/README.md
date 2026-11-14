@@ -33,12 +33,39 @@ export function App() {
 - **`AgentChat`** sends each message as a run with a shared session id and streams the reply.
 - **`SeclaiAgent`** renders one of the two based on `mode`.
 
+### Files in `AgentChat`
+
+When the agent accepts attachments, `AgentChat` shows an **Attach** button. Files can also be dropped on the composer or pasted into the message box. Each file uploads as soon as it's added and shows as a chip, with a thumbnail for images, and its upload id goes with the next message. Send stays disabled while a file is uploading. The files a user sent show in their turn. Agents that take no files get the text-only chat, with no attach button.
+
+The chat applies the agent's attachment slots to each message as a whole: it accepts the content types of all the slots, and up to the sum of their `max` (no limit if any slot has none). A file that doesn't fit is refused with a message under the box. A file the browser reports no type for (such as HEIC on Windows, or `.md`) isn't refused for its type: the server decides. A run takes one flat list of upload ids, so the chat can't fill slots separately.
+
+To tell files apart, add named buttons with tags, then use the tags in `onBeforeSend` to describe the files to the agent. Whatever it returns is sent as the run's input, and the transcript keeps what the user typed:
+
+```tsx
+<AgentChat
+  attachButtons={[
+    { label: "+ Headshot", tag: "headshot" },
+    { label: "+ Style reference", tag: "style" },
+  ]}
+  onBeforeSend={({ input, files }) =>
+    [...files.map((f, i) => `Image ${i + 1} (${f.name}) is the ${f.tag ?? "image"}.`), input].join("\n")
+  }
+/>
+```
+
+| Prop | |
+|---|---|
+| `attachButtons` | `{ label: string; tag?: string }[]`. Replaces the single Attach button. Dropped and pasted files have no tag |
+| `onBeforeSend` | `({ input, files }) => string \| void`, where `files` are `{ uploadId, name, contentType, tag? }`. Return a string to send it in place of the typed text |
+
 ### `useAgentRun`
 
 Build your own UI on the hook:
 
 ```tsx
-const { status, text, steps, attachments, error, start, cancel } = useAgentRun();
+const { status, text, steps, attachments, error, startedAt, start, cancel, reset } = useAgentRun({
+  onEvent: (event) => console.debug(event.event, event.data),
+});
 
 await start({ input: "Hello", uploadIds: ["..."], sessionId: "..." });
 ```
@@ -46,8 +73,69 @@ await start({ input: "Hello", uploadIds: ["..."], sessionId: "..." });
 - `status` is `idle`, `running`, `completed`, `failed` or `cancelled`.
 - `text` holds streamed tokens while running, then the run's final output.
 - `attachments` have a `url` that goes through your download handler.
-- `start` resolves with the final state and doesn't reject. Failures appear in `status` and `error`.
+- `startedAt` is when `start` began, from `Date.now()`. It's kept after the run ends and is `null` before the first run and after `reset`.
+- `start` resolves with the final state and doesn't reject. Failures appear in `status` and `error`. A run stopped by `cancel()` or `reset()` resolves as `cancelled`.
 - `cancel` stops streaming, but the run carries on at Seclai.
+- `reset` returns to `idle` and clears `text`, `steps`, `attachments`, `error`, `runId` and `startedAt`. During a run it stops streaming as `cancel` does, so the run also carries on at Seclai.
+- `onEvent` is called with each event from the run stream, `{ event, data }`, in order, as the hook updates its state. Events from a stopped run aren't passed on. The latest callback is always used, so an inline function is fine. If it throws, the error goes to `console.error` and the run carries on.
+
+Options also take `basePath` and `agentId`, as the components do.
+
+Runs that generate images can take a minute or two, so show the time elapsed:
+
+```tsx
+function Elapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  return <>{Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}</>;
+}
+
+const run = useAgentRun();
+
+{run.status === "running" && run.startedAt !== null && (
+  <p>
+    Usually takes a minute or two · <Elapsed startedAt={run.startedAt} />
+  </p>
+)}
+```
+
+### Building your own UI
+
+To upload files and run the agent from your own UI, use the helpers the components are built on:
+
+- **`createEndpoints({ basePath, agentId })`** returns the handler URLs (`AgentEndpoints`): `attachmentReferences`, `upload`, `run`, and `download(runId, attachmentId, name?)`. Pass it the same options as `useAgentRun`.
+- **`uploadFile(endpoints, file, { signal }?)`** uploads one file and resolves with its `id`.
+- **`fetchAttachmentReferences(endpoints, { signal }?)`** resolves with the files the agent accepts (`accepted_attachments`) and whether it needs any (`requires_uploads`).
+
+On an error response, `uploadFile` and `fetchAttachmentReferences` reject with an `Error` whose message comes from the handler. On a network failure or an aborted `signal`, they reject as `fetch` does.
+
+Upload the files first, then start the run with their ids:
+
+```tsx
+import { createEndpoints, uploadFile, useAgentRun } from "@seclai/react";
+
+const endpoints = createEndpoints({ agentId: "my-agent" });
+
+function Ask() {
+  const { start } = useAgentRun({ agentId: "my-agent" });
+
+  async function send(input: string, files: File[]) {
+    const uploads = await Promise.all(files.map((file) => uploadFile(endpoints, file)));
+    await start({ input, uploadIds: uploads.map((upload) => upload.id) });
+  }
+  // ...
+}
+```
+
+A run's `attachments` already have a `url`. To show a file from a run you stored earlier, build the URL with `download` rather than by hand:
+
+```tsx
+<a href={endpoints.download(saved.runId, saved.attachmentId, saved.name)}>{saved.name}</a>
+```
 
 ## Styling
 
@@ -66,6 +154,44 @@ Fonts and text colour come from your page. The default colours follow your page'
 
 **On a dark page, declare `color-scheme: dark`** (or `light dark`). Without it the defaults stay in their light versions, and the purple links and focus rings are too dark to read.
 
+## Media
+
+`AgentRunForm` and `AgentChat` show a run's attachments in a `MediaGallery`. The media components are exported too, for your own UI:
+
+```tsx
+import { MediaGallery, MediaPreview, MediaSkeleton, MediaViewer } from "@seclai/react";
+
+<MediaGallery
+  attachments={run.attachments}
+  aspectRatio="16 / 9"
+  pending={run.status === "running" ? 4 : 0}
+  actions={(attachment, number) => <button onClick={() => refine(number)}>Refine</button>}
+/>
+```
+
+- **`MediaPreview`** shows one attachment. An image gets a card: a fixed-ratio frame so the layout doesn't jump while it loads, an optional number badge and a download link. Files that aren't images are a download link.
+- **`MediaGallery`** lays out a run's images as numbered cards that open a full-size viewer, with "Download all" when there's more than one. It downloads the files one at a time, because browsers block a burst of simultaneous downloads. Other files follow the images as download links.
+- **`MediaSkeleton`** is a placeholder card for an image that's still being generated. It pulses, unless the user prefers reduced motion.
+- **`MediaViewer`** is the gallery's full-size viewer, a modal `<dialog>` with previous and next (also on the arrow keys) and a download button. Escape, the close button or a click on the backdrop closes it, and focus goes back to where it was. It's controlled: pass the `index` to show, or `null` when closed.
+- **`attachmentFileName(attachment, number?)`** is the filename the components save a file as: its own name, or else `image-<number>` (or its id) with an extension from the mime type, such as `image-2.png`.
+
+| `MediaPreview` prop | |
+|---|---|
+| `attachment` | Required. The file to show |
+| `aspectRatio` | The frame's ratio, as a number (`16 / 9`) or a string (`"16 / 9"`). Without it the frame takes the image's own ratio once it loads, and `--seclai-media-aspect-ratio` (square) until then |
+| `number` | A badge on the image, matching the agent's numbered list. Also names an unnamed download `image-<number>` |
+| `actions` | App-specific buttons after the download link: a node, or a function of the attachment |
+| `onOpen` | Makes the image a button, for opening a viewer |
+
+| `MediaGallery` prop | |
+|---|---|
+| `attachments` | Required. A run's attachments |
+| `aspectRatio` | Every card's ratio. Without it each card takes its image's own ratio |
+| `pending` | How many skeleton cards to show after the images, numbered on from them |
+| `actions` | `(attachment, number) => ReactNode`, for each image card |
+
+The stylesheet adds these variables for media: `--seclai-media-aspect-ratio` (a frame's ratio before its image loads, `1 / 1`), `--seclai-media-fit` (`object-fit` in the frame, `scale-down`, so small images keep their natural size), `--seclai-media-min-width` (a gallery column's minimum width, `220px`) and `--seclai-media-max-width` (a card's width outside a gallery, `480px`). The viewer is dark in both colour schemes.
+
 ## Placeholders
 
 These are exported so the API is in place, but they're minimal until they're ported from the main Seclai app:
@@ -73,7 +199,7 @@ These are exported so the API is in place, but they're minimal until they're por
 | Export | For now | Coming |
 |---|---|---|
 | `MarkdownContent` | Plain text | GFM tables, KaTeX, mermaid, sanitized SVG |
-| `MediaPreview` | Images inline, a download link for everything else | Image, audio, video, PDF, download fallback |
+| `MediaPreview` | Image cards (see [Media](#media)), a download link for everything else | Audio, video and PDF previews |
 
 ## License
 

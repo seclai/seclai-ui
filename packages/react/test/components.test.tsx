@@ -1,15 +1,15 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
-import { AgentChat, AgentRunForm, SeclaiAgent } from "../src";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { AgentChat, AgentRunForm, SeclaiAgent, type AgentChatMessage } from "../src";
 import { jsonResponse, sse, sseResponse } from "./helpers";
 
 const RUN = "3f2b8c1e-7a4d-4e9b-9c11-0d5e6f7a8b9c";
 
 interface Routes {
   refs?: unknown;
-  upload?: (file: File) => Response;
+  upload?: (file: File) => Response | Promise<Response>;
   run?: (body: Record<string, unknown>) => Response;
 }
 
@@ -198,6 +198,9 @@ describe("AgentRunForm", () => {
       "attachmentId=doc",
     );
     expect(document.body.innerHTML).not.toContain("https://api/");
+    // The image is a card in a gallery, which opens it full size.
+    expect(screen.getByRole("button", { name: "Open out.png full size" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Download all/ })).toBeNull();
   });
 
   it("reports the result to onFinish", async () => {
@@ -326,6 +329,371 @@ describe("AgentChat", () => {
 
     await say(user, "draw a cat");
     expect(await screen.findByAltText("cat.png")).toBeTruthy();
+  });
+
+  it("numbers a turn's images and offers to download them all", async () => {
+    stubApi({
+      run: () =>
+        completed("Here are two", {
+          attachments: [
+            { id: "one", name: null, mime: "image/png", bytes: 1 },
+            { id: "two", name: null, mime: "image/png", bytes: 1 },
+          ],
+        }),
+    });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await say(user, "draw two cats");
+    expect(await screen.findByAltText("Image 1")).toBeTruthy();
+    expect(screen.getByAltText("Image 2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Download all 2" })).toBeTruthy();
+  });
+});
+
+describe("AgentChat attachments", () => {
+  const imageSlot = { name: "images", label: "Images", max: 2, content_types: ["image/*"] };
+  const withSlots = (...slots: object[]) => ({
+    requires_uploads: false,
+    accepted_attachments: slots,
+  });
+  const png = (name: string) => new File([name], name, { type: "image/png" });
+
+  function idUploads() {
+    let next = 0;
+    return () => jsonResponse({ id: `up-${next++}`, status: "ready" });
+  }
+
+  /** An upload the test finishes by hand. */
+  function heldUploads() {
+    const pending: (() => void)[] = [];
+    let next = 0;
+    const upload = () =>
+      new Promise<Response>((resolve) => {
+        const id = `up-${next++}`;
+        pending.push(() => resolve(jsonResponse({ id, status: "ready" })));
+      });
+    return { upload, release: () => pending.splice(0).forEach((finish) => finish()) };
+  }
+
+  const sendButton = () => screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
+  const chips = () => within(screen.getByRole("list", { name: "Files to send" })).getAllByRole("listitem");
+
+  it("shows no attach control when the agent accepts no files", async () => {
+    const { fetchMock } = stubApi({ refs: withSlots() });
+    render(<AgentChat />);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/seclai/attachment-references", expect.anything()),
+    );
+    await act(async () => {});
+    expect(screen.queryByLabelText("Attach")).toBeNull();
+    expect(document.querySelector('input[type="file"]')).toBeNull();
+  });
+
+  it("shows an Attach control, a label around a visually hidden input", async () => {
+    stubApi({ refs: withSlots(imageSlot) });
+    render(<AgentChat />);
+
+    const input = (await screen.findByLabelText("Attach")) as HTMLInputElement;
+    expect(input.type).toBe("file");
+    expect(input.accept).toBe("image/*");
+    expect(input.multiple).toBe(true);
+    expect(input.closest("label")?.textContent).toBe("Attach");
+    expect(input.className).toBe("seclai-sr-only");
+    expect(input.hidden).toBe(false);
+    expect(input.style.display).not.toBe("none");
+    expect(getComputedStyle(input).display).not.toBe("none");
+  });
+
+  it("uploads a file when it's added and sends its id with the next message", async () => {
+    const { runBodies } = stubApi({
+      refs: withSlots(imageSlot),
+      upload: idUploads(),
+      run: () => completed("Nice photo"),
+    });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await user.upload(await screen.findByLabelText("Attach"), png("me.png"));
+    await waitFor(() => expect(chips()[0]!.dataset.status).toBe("ready"));
+
+    await user.type(screen.getByLabelText("Message"), "what do you see");
+    await user.click(sendButton());
+
+    expect(await screen.findByText("Nice photo")).toBeTruthy();
+    expect(runBodies[0]).toMatchObject({ input: "what do you see", uploadIds: ["up-0"] });
+    expect(screen.queryByRole("list", { name: "Files to send" })).toBeNull();
+    const sent = screen.getByRole("list", { name: "Attached files" });
+    expect(within(sent).getByText("me.png")).toBeTruthy();
+  });
+
+  it("sends files with no text", async () => {
+    const { runBodies } = stubApi({
+      refs: withSlots(imageSlot),
+      upload: idUploads(),
+      run: () => completed("ok"),
+    });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await user.upload(await screen.findByLabelText("Attach"), png("a.png"));
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    await user.click(sendButton());
+
+    await screen.findByText("ok");
+    expect(runBodies[0]!.input).toBeUndefined();
+    expect(runBodies[0]!.uploadIds).toEqual(["up-0"]);
+  });
+
+  it("keeps Send disabled while a file uploads", async () => {
+    const held = heldUploads();
+    stubApi({ refs: withSlots(imageSlot), upload: held.upload });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await user.upload(await screen.findByLabelText("Attach"), png("a.png"));
+    await user.type(screen.getByLabelText("Message"), "hi");
+    expect(chips()[0]!.textContent).toContain("Uploading…");
+    expect(sendButton().disabled).toBe(true);
+
+    held.release();
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+  });
+
+  it("refuses files over the slot's max per message", async () => {
+    const { fetchMock } = stubApi({ refs: withSlots(imageSlot), upload: idUploads() });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    const input = (await screen.findByLabelText("Attach")) as HTMLInputElement;
+    await user.upload(input, [png("a.png"), png("b.png"), png("c.png")]);
+
+    expect(chips()).toHaveLength(2);
+    expect(screen.getByRole("alert").textContent).toContain("up to 2 files per message");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(input.disabled).toBe(true);
+    expect(input.closest("label")!.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("refuses a file of a type the agent doesn't accept", async () => {
+    const { fetchMock } = stubApi({ refs: withSlots(imageSlot), upload: idUploads() });
+    const user = userEvent.setup({ applyAccept: false });
+    render(<AgentChat />);
+
+    await user.upload(
+      await screen.findByLabelText("Attach"),
+      new File(["x"], "notes.pdf", { type: "application/pdf" }),
+    );
+
+    expect(screen.getByRole("alert").textContent).toContain("notes.pdf");
+    expect(screen.queryByRole("list", { name: "Files to send" })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a file with no reported type through and leaves the decision to the server", async () => {
+    const { fetchMock } = stubApi({ refs: withSlots(imageSlot), upload: idUploads() });
+    const user = userEvent.setup({ applyAccept: false });
+    render(<AgentChat />);
+
+    await user.upload(await screen.findByLabelText("Attach"), new File(["x"], "photo.heic", { type: "" }));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(chips()[0]!.textContent).toContain("photo.heic");
+    await waitFor(() => expect(chips()[0]!.dataset.status).toBe("ready"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes a chip, which frees its place and leaves it out of the run", async () => {
+    const { runBodies } = stubApi({
+      refs: withSlots(imageSlot),
+      upload: idUploads(),
+      run: () => completed("ok"),
+    });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    const input = (await screen.findByLabelText("Attach")) as HTMLInputElement;
+    await user.upload(input, [png("a.png"), png("b.png")]);
+    await waitFor(() => expect(chips().every((c) => c.dataset.status === "ready")).toBe(true));
+    expect(input.disabled).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Remove a.png" }));
+    expect(chips()).toHaveLength(1);
+    expect(input.disabled).toBe(false);
+
+    await user.click(sendButton());
+    await screen.findByText("ok");
+    expect(runBodies[0]!.uploadIds).toEqual(["up-1"]);
+  });
+
+  it("shows a failed upload on its chip and doesn't send it", async () => {
+    stubApi({
+      refs: withSlots(imageSlot),
+      upload: () => jsonResponse({ error: "File too large", status: 413 }, 413),
+    });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await user.upload(await screen.findByLabelText("Attach"), png("big.png"));
+    await waitFor(() => expect(chips()[0]!.dataset.status).toBe("error"));
+    expect(chips()[0]!.textContent).toContain("File too large");
+    expect(sendButton().disabled).toBe(true);
+  });
+
+  it("accepts files dropped on the composer", async () => {
+    const { fetchMock } = stubApi({ refs: withSlots(imageSlot), upload: idUploads() });
+    render(<AgentChat />);
+    await screen.findByLabelText("Attach");
+
+    const form = screen.getByLabelText("Message").closest("form")!;
+    const dataTransfer = { files: [png("dropped.png")], types: ["Files"] };
+    fireEvent.dragOver(form, { dataTransfer });
+    expect(form.classList.contains("seclai-dropping")).toBe(true);
+    fireEvent.drop(form, { dataTransfer });
+
+    expect(form.classList.contains("seclai-dropping")).toBe(false);
+    expect(chips()[0]!.textContent).toContain("dropped.png");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("accepts files pasted into the message box", async () => {
+    stubApi({ refs: withSlots(imageSlot), upload: idUploads() });
+    render(<AgentChat />);
+    await screen.findByLabelText("Attach");
+
+    const event = createEvent.paste(screen.getByLabelText("Message"), {
+      clipboardData: { files: [png("pasted.png")], types: ["Files"], getData: () => "" },
+    });
+    fireEvent(screen.getByLabelText("Message"), event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(chips()[0]!.textContent).toContain("pasted.png");
+    await waitFor(() => expect(chips()[0]!.dataset.status).toBe("ready"));
+  });
+
+  it("pastes text, not the image next to it, when the clipboard has both", async () => {
+    const { fetchMock } = stubApi({ refs: withSlots(imageSlot), upload: idUploads() });
+    render(<AgentChat />);
+    await screen.findByLabelText("Attach");
+
+    const box = screen.getByLabelText("Message");
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        files: [png("cells.png")],
+        types: ["text/plain", "Files"],
+        getData: (format: string) => (format === "text/plain" ? "A1\tB1" : ""),
+      },
+    });
+    fireEvent(box, event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("list", { name: "Files to send" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an image thumbnail on the chip and in the sent turn", async () => {
+    // jsdom has no object URLs.
+    let n = 0;
+    const revoked: string[] = [];
+    URL.createObjectURL = () => `blob:thumb-${n++}`;
+    URL.revokeObjectURL = (url) => void revoked.push(url);
+    onTestFinished(() => {
+      delete (URL as { createObjectURL?: unknown }).createObjectURL;
+      delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+    });
+    stubApi({ refs: withSlots(imageSlot), upload: idUploads(), run: () => completed("ok") });
+    const user = userEvent.setup();
+    const { container, unmount } = render(<AgentChat />);
+
+    await user.upload(await screen.findByLabelText("Attach"), png("me.png"));
+    expect(container.querySelector(".seclai-file-thumb")!.getAttribute("src")).toBe("blob:thumb-0");
+
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    await user.click(sendButton());
+    await screen.findByText("ok");
+    expect(container.querySelector(".seclai-turn-user .seclai-file-thumb")!.getAttribute("src")).toBe(
+      "blob:thumb-0",
+    );
+
+    unmount();
+    expect(revoked).toEqual(["blob:thumb-0"]);
+  });
+
+  it("renders named attach buttons and passes their tags to onBeforeSend", async () => {
+    const onBeforeSend = vi.fn(
+      ({ input, files }: AgentChatMessage) =>
+        `${files.map((f) => `${f.name} is the ${f.tag}.`).join(" ")} ${input}`,
+    );
+    const { runBodies } = stubApi({
+      refs: withSlots(imageSlot),
+      upload: idUploads(),
+      run: () => completed("ok"),
+    });
+    const user = userEvent.setup();
+    render(
+      <AgentChat
+        attachButtons={[
+          { label: "+ Headshot", tag: "headshot" },
+          { label: "+ Style reference", tag: "style" },
+        ]}
+        onBeforeSend={onBeforeSend}
+      />,
+    );
+
+    await user.upload(await screen.findByLabelText("+ Headshot"), png("me.png"));
+    await user.upload(screen.getByLabelText("+ Style reference"), png("ref.png"));
+    expect(screen.queryByLabelText("Attach")).toBeNull();
+    expect(chips()[0]!.textContent).toContain("headshot");
+
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    await user.type(screen.getByLabelText("Message"), "make it pop");
+    await user.click(sendButton());
+    await screen.findByText("ok");
+
+    expect(onBeforeSend).toHaveBeenCalledWith({
+      input: "make it pop",
+      files: [
+        { uploadId: "up-0", name: "me.png", contentType: "image/png", tag: "headshot" },
+        { uploadId: "up-1", name: "ref.png", contentType: "image/png", tag: "style" },
+      ],
+    });
+    expect(runBodies[0]!.input).toBe("me.png is the headshot. ref.png is the style. make it pop");
+    // The transcript keeps what the user typed.
+    expect(screen.getByText("make it pop")).toBeTruthy();
+  });
+
+  it("combines several slots into one limit and type list", async () => {
+    stubApi({
+      refs: withSlots(imageSlot, { name: "doc", max: 1, content_types: ["application/pdf"] }),
+    });
+    render(<AgentChat />);
+
+    const input = (await screen.findByLabelText("Attach")) as HTMLInputElement;
+    expect(input.accept).toBe("image/*,application/pdf");
+  });
+
+  it("still chats when the attachment references can't be loaded", async () => {
+    const runBodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith("/attachment-references")) {
+          return jsonResponse({ error: "Agent not found", status: 404 }, 404);
+        }
+        runBodies.push(JSON.parse(init!.body as string));
+        return completed("ok");
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await user.type(screen.getByLabelText("Message"), "hi");
+    await user.click(sendButton());
+    await screen.findByText("ok");
+    expect(screen.queryByLabelText("Attach")).toBeNull();
+    expect(runBodies[0]).toMatchObject({ input: "hi" });
   });
 });
 

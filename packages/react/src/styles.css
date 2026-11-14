@@ -170,6 +170,15 @@
   .seclai-agent input[type="file"]:hover::file-selector-button {
     background: var(--seclai-surface-hover);
   }
+
+  .seclai-attach[aria-disabled="true"]:hover {
+    background: transparent;
+  }
+
+  .seclai-file-remove:hover {
+    color: var(--seclai-text);
+    background: var(--seclai-surface-hover);
+  }
 }
 
 @media (pointer: coarse) {
@@ -236,6 +245,131 @@
   border-radius: var(--seclai-radius);
 }
 
+/* Attachments in the chat composer */
+.seclai-form.seclai-dropping {
+  outline: 2px dashed var(--seclai-accent);
+  outline-offset: 4px;
+  border-radius: var(--seclai-radius);
+}
+
+/* Hidden from view but not from the browser, so a wrapping label opens the picker. */
+.seclai-agent .seclai-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.seclai-attach:focus-within {
+  outline: 2px solid var(--seclai-focus);
+  outline-offset: 2px;
+}
+
+/* A mouse click on the label focuses the input too; ring keyboard focus only. */
+@supports selector(:has(*)) {
+  .seclai-attach:focus-within:not(:has(:focus-visible)) {
+    outline: none;
+  }
+}
+
+.seclai-attach[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.seclai-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.seclai-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  min-height: 40px;
+  padding: 4px 4px 4px 8px;
+  font-size: 0.8125em;
+  background: var(--seclai-surface);
+  border: 1px solid var(--seclai-border);
+  border-radius: var(--seclai-radius);
+}
+
+.seclai-file:has(.seclai-file-thumb) {
+  padding-inline-start: 4px;
+}
+
+.seclai-file-thumb {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: calc(var(--seclai-radius) - 3px);
+}
+
+.seclai-file-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.seclai-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seclai-file-meta {
+  color: var(--seclai-muted);
+}
+
+.seclai-file[data-status="uploading"] .seclai-file-thumb {
+  opacity: 0.5;
+}
+
+.seclai-file[data-status="error"] {
+  border-color: var(--seclai-error);
+  background: var(--seclai-error-surface);
+}
+
+.seclai-file[data-status="error"] .seclai-file-meta {
+  color: var(--seclai-error);
+}
+
+.seclai-file-remove {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font: inherit;
+  font-size: 1.25em;
+  line-height: 1;
+  color: var(--seclai-muted);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--seclai-radius) - 3px);
+}
+
+/* A 44px hit target around the small button. */
+.seclai-file-remove::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+}
+
 .seclai-markdown {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -261,6 +395,282 @@
 .seclai-media a {
   color: var(--seclai-accent);
   text-underline-offset: 0.16em;
+}
+
+/*
+ * Image cards, galleries, skeletons and the viewer. Also themable with:
+ *   --seclai-media-aspect-ratio  a frame's ratio before its image loads (1 / 1)
+ *   --seclai-media-fit           object-fit for the image in its frame (scale-down)
+ *   --seclai-media-min-width     a gallery column's minimum width (220px)
+ *   --seclai-media-max-width     a card's width outside a gallery (480px)
+ */
+.seclai-gallery,
+.seclai-gallery *,
+.seclai-media-image,
+.seclai-media-image *,
+.seclai-viewer,
+.seclai-viewer * {
+  box-sizing: border-box;
+}
+
+.seclai-gallery :focus-visible,
+.seclai-media-image :focus-visible,
+.seclai-viewer :focus-visible {
+  outline: 2px solid var(--seclai-focus);
+  outline-offset: 2px;
+}
+
+/* A button that stays focusable while it does nothing. */
+.seclai-button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.seclai-button[aria-disabled="true"]:active {
+  transform: none;
+}
+
+@media (hover: hover) {
+  .seclai-button[aria-disabled="true"]:hover {
+    background: transparent;
+  }
+}
+
+.seclai-media-image {
+  width: 100%;
+  max-width: var(--seclai-media-max-width, 480px);
+  gap: 0;
+  overflow: hidden;
+  background: var(--seclai-surface);
+  border: 1px solid var(--seclai-border);
+  border-radius: var(--seclai-radius);
+}
+
+.seclai-media-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: var(--seclai-media-aspect-ratio, 1 / 1);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  font: inherit;
+  color: inherit;
+  background: var(--seclai-surface-hover);
+  border: 0;
+  border-radius: 0;
+}
+
+button.seclai-media-frame {
+  cursor: zoom-in;
+}
+
+/* Inset, so the card's own overflow doesn't clip the ring. */
+button.seclai-media-frame:focus-visible {
+  outline-offset: -2px;
+}
+
+.seclai-media-frame > img {
+  align-self: auto;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  object-fit: var(--seclai-media-fit, scale-down);
+  border-radius: 0;
+  transition: transform 200ms ease-out;
+}
+
+@media (hover: hover) {
+  button.seclai-media-frame:hover > img {
+    transform: scale(1.02);
+  }
+}
+
+/* Fixed colours: the badge sits on the image, not on the page. */
+.seclai-media-badge {
+  position: absolute;
+  top: 8px;
+  inset-inline-start: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: #ffffff;
+  background: rgb(0 0 0 / 0.72);
+  border-radius: 999px;
+}
+
+.seclai-media-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  color: var(--seclai-muted);
+  text-align: center;
+}
+
+.seclai-media-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--seclai-control-height);
+  padding: 8px 12px;
+}
+
+.seclai-media-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-inline-start: 8px;
+  vertical-align: middle;
+}
+
+.seclai-media-bar .seclai-media-actions {
+  margin-inline-start: auto;
+}
+
+/* Skeleton cards */
+.seclai-media-skeleton .seclai-media-frame,
+.seclai-media-skeleton-line {
+  animation: seclai-pulse 1.6s ease-in-out infinite;
+}
+
+.seclai-media-skeleton .seclai-media-badge {
+  background: rgb(0 0 0 / 0.4);
+}
+
+.seclai-media-skeleton-line {
+  display: block;
+  width: 72px;
+  height: 0.75em;
+  background: var(--seclai-surface-hover);
+  border-radius: 4px;
+}
+
+/* Galleries */
+.seclai-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--seclai-gap) / 2);
+}
+
+.seclai-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(100%, var(--seclai-media-min-width, 220px)), 1fr)
+  );
+  gap: calc(var(--seclai-gap) * 0.75);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.seclai-gallery-grid > li {
+  min-width: 0;
+}
+
+.seclai-gallery-grid .seclai-media-image {
+  max-width: none;
+  height: 100%;
+}
+
+.seclai-gallery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--seclai-gap) / 2);
+}
+
+/*
+ * The viewer is dark in both colour schemes, like most photo viewers, so it
+ * sets its own text and border colours and keeps only the accent.
+ */
+.seclai-viewer {
+  --seclai-text: #ffffff;
+  --seclai-muted: rgb(255 255 255 / 0.7);
+  --seclai-border: rgb(255 255 255 / 0.2);
+  --seclai-field-border: rgb(255 255 255 / 0.45);
+  --seclai-surface-hover: rgb(255 255 255 / 0.14);
+  --seclai-focus: #ffffff;
+  color-scheme: dark;
+  width: min(100vw - 32px, 1400px);
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  overflow: visible;
+  font-family: var(--seclai-font);
+  line-height: 1.5;
+  color: var(--seclai-text);
+  background: transparent;
+  border: 0;
+}
+
+.seclai-viewer::backdrop {
+  background: rgb(0 0 0 / 0.85);
+}
+
+.seclai-viewer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.seclai-viewer-image {
+  display: block;
+  width: 100%;
+  max-height: calc(100dvh - 120px);
+  object-fit: contain;
+  border-radius: var(--seclai-radius);
+}
+
+.seclai-viewer-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.seclai-viewer-title {
+  margin: 0;
+  margin-inline-end: auto;
+  font-size: 0.875em;
+  overflow-wrap: anywhere;
+}
+
+.seclai-viewer-count {
+  margin-inline-start: 8px;
+  font-variant-numeric: tabular-nums;
+  color: var(--seclai-muted);
+}
+
+.seclai-viewer a.seclai-button {
+  text-decoration: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seclai-media-skeleton .seclai-media-frame,
+  .seclai-media-skeleton-line {
+    animation: none;
+  }
+
+  .seclai-media-frame > img {
+    transition: none;
+  }
+
+  button.seclai-media-frame:hover > img {
+    transform: none;
+  }
 }
 
 /* Messages */
