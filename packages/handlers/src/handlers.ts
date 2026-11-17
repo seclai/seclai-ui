@@ -95,7 +95,7 @@ export interface UploadResult {
 }
 
 /** Checks and a hook for the `upload` handler. All are off by default. */
-export interface SeclaiUploadOptions {
+export interface SeclaiUploadOptions<Ctx = undefined> {
   /**
    * Largest file accepted, in bytes. Anything bigger gets a 413 without reaching
    * the API. A request whose `content-length` is too big is refused before its
@@ -121,11 +121,16 @@ export interface SeclaiUploadOptions {
    * Called after a successful upload, for example to keep a copy of the file or
    * record which session it belongs to. Return a `Response` to send it instead of
    * the default JSON. `req`'s body has already been read. A throw becomes a 500.
+   *
+   * `context` is the app's context for this request, the same value the
+   * access-control hooks get. It is resolved before the file is uploaded, so a
+   * `context` that refuses does so before the file reaches Seclai.
    */
   onUpload?(
     file: File,
     result: UploadResult,
     req: Request,
+    context: Ctx,
   ): void | Response | Promise<void | Response>;
 }
 
@@ -139,20 +144,20 @@ export interface SeclaiHandlersOptions<Ctx = undefined> {
   /** How long a streaming run may take, in milliseconds. Defaults to 11 minutes. */
   runTimeoutMs?: number;
   /** Size limit, content-type check and hook for the `upload` handler. */
-  upload?: SeclaiUploadOptions;
+  upload?: SeclaiUploadOptions<Ctx>;
   /**
    * Called with each event of a run stream, in order, and awaited before the
    * event is relayed to the browser. If it throws, the stream ends with an
    * `error` event.
    */
-  onEvent?: RunEventCallback;
+  onEvent?: RunEventCallback<Ctx>;
   /**
    * Called exactly once for each run that started streaming, with how it ended.
    * Awaited before the final `done`, `error` or `timeout` event is relayed, so
    * whatever it stores is in place when the browser sees the run end. If it
    * throws, the browser gets an `error` event instead.
    */
-  onRunEnd?: RunEndCallback;
+  onRunEnd?: RunEndCallback<Ctx>;
   /**
    * What happens to a run when the browser disconnects: closes the tab, moves
    * to another page, or aborts the request. The run itself always carries on at
@@ -493,6 +498,18 @@ export function createSeclaiHandlers<Ctx>(
   }
 
   const build = (resolveCtx: (req: Request) => Promise<Ctx>): SeclaiHandlers => {
+    // Resolved at most once per request, and shared by the hooks and the
+    // callbacks, so the `context` option isn't called twice.
+    const resolved = new WeakMap<Request, Promise<Ctx>>();
+    const resolve = (req: Request): Promise<Ctx> => {
+      let ctx = resolved.get(req);
+      if (!ctx) {
+        ctx = resolveCtx(req);
+        resolved.set(req, ctx);
+      }
+      return ctx;
+    };
+
     const handlers: Omit<SeclaiHandlers, "handle"> = {
       async attachmentReferences(req) {
         if (req.method !== "GET") return wrongMethod("GET");
@@ -535,7 +552,7 @@ export function createSeclaiHandlers<Ctx>(
         if (maxBytes !== undefined && file.size > maxBytes) return refused("upload", tooLarge(), fileFields);
 
         if (authorizeUpload) {
-          const result = await callHook("authorizeUpload", req, resolveCtx, (ctx) =>
+          const result = await callHook("authorizeUpload", req, resolve, (ctx) =>
             authorizeUpload(req, file, ctx),
           );
           if ("response" in result) return refused("upload", result.response, fileFields);
@@ -551,6 +568,7 @@ export function createSeclaiHandlers<Ctx>(
         }
 
         let result: UploadResult;
+        let uploadContext: Ctx | undefined;
         try {
           // An unknown type isn't a wrong one: browsers give none to `.md`, some
           // `.csv` files or HEIC on Windows, and multipart encoding then labels the
@@ -561,6 +579,14 @@ export function createSeclaiHandlers<Ctx>(
             if (!accepted.some((slot) => slotAllows(slot, type))) {
               return refused("upload", jsonError(415, `This agent does not accept files of type ${type}.`), fileFields);
             }
+          }
+
+          // `onUpload` gets the request's context. It is resolved before the
+          // file reaches Seclai, so a `context` that refuses does so first.
+          if (onUpload) {
+            const ctx = await callHook("context", req, resolve, (c) => c);
+            if ("response" in ctx) return refused("upload", ctx.response, fileFields);
+            uploadContext = ctx.value;
           }
 
           const upload = await client.uploadAgentInput(agentId, {
@@ -594,7 +620,7 @@ export function createSeclaiHandlers<Ctx>(
 
         if (onUpload) {
           try {
-            const replacement = await onUpload(file, result, req);
+            const replacement = await onUpload(file, result, req, uploadContext as Ctx);
             if (replacement instanceof Response) return replacement;
           } catch (err) {
             // The app's own error: its message could hold anything, so it stays
@@ -620,7 +646,7 @@ export function createSeclaiHandlers<Ctx>(
 
         let body = parsed;
         if (authorizeRun) {
-          const result = await callHook("authorizeRun", req, resolveCtx, (ctx) =>
+          const result = await callHook("authorizeRun", req, resolve, (ctx) =>
             authorizeRun(req, parsed, ctx),
           );
           if ("response" in result) return refused("run", result.response);
@@ -642,6 +668,15 @@ export function createSeclaiHandlers<Ctx>(
             return jsonError(500, NOT_AUTHORIZED);
           }
           body = rewritten;
+        }
+
+        // The run callbacks get the request's context. Resolved before the run
+        // starts, so a `context` that refuses does so before any credits are used.
+        let runContext: Ctx | undefined;
+        if (onEvent || onRunEnd) {
+          const ctx = await callHook("context", req, resolve, (c) => c);
+          if ("response" in ctx) return refused("run", ctx.response);
+          runContext = ctx.value;
         }
 
         const upstream = new AbortController();
@@ -680,7 +715,11 @@ export function createSeclaiHandlers<Ctx>(
           // `body` is the one that ran: after any `authorizeRun` rewrite.
           const observer =
             onEvent || onRunEnd || log
-              ? createRunObserver({ onEvent, onRunEnd, log }, { body, request: req }, { keepReading })
+              ? createRunObserver(
+                  { onEvent, onRunEnd, log },
+                  { body, request: req, context: runContext as Ctx },
+                  { keepReading },
+                )
               : undefined;
           return new Response(
             relayRunEvents(
@@ -720,7 +759,7 @@ export function createSeclaiHandlers<Ctx>(
         }
 
         if (authorizeDownload) {
-          const result = await callHook("authorizeDownload", req, resolveCtx, (ctx) =>
+          const result = await callHook("authorizeDownload", req, resolve, (ctx) =>
             authorizeDownload(req, { runId, attachmentId }, ctx),
           );
           const ids = { run_id: runId, attachment_id: attachmentId };

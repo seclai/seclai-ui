@@ -82,13 +82,13 @@ const seclai = createSeclaiHandlers({
 |---|---|---|
 | `maxBytes` | No limit | Largest file accepted, in bytes. A bigger one gets a 413 |
 | `checkContentType` | `false` | Give a 415 to a file whose type none of the agent's attachment slots accepts |
-| `onUpload(file, result, req)` | None | Called after a successful upload. Return a `Response` to replace the default JSON |
+| `onUpload(file, result, req, context)` | None | Called after a successful upload. Return a `Response` to replace the default JSON |
 
 The size checks and the content-type check refuse a file before it reaches the API, and `onUpload` runs only after the API has accepted one. In order, `upload` checks the size, then calls [`authorizeUpload`](#access-control), then checks the content type, so a refused caller never triggers the slot lookup.
 
 - **`maxBytes`** is checked against `content-length` first, so a request that declares an oversized body is refused before it's read. Without `content-length`, as with a chunked body, the bytes are counted as they stream and reading stops with a 413 once they pass the limit. Both checks allow 64 KB for the multipart envelope, and the file's own size is checked once the form is read.
 - **`checkContentType`** reads the slots with `getAgentAttachmentReferences` and reuses them for 60 seconds, so an edit to the agent's slots takes up to a minute to apply. A slot type is exact, like `application/pdf`, or a wildcard, like `image/*`. A slot with no types accepts every file. A file of unknown type isn't checked and goes on to the API, which decides: browsers send no type for `.md`, some `.csv` files or HEIC on Windows, and such a file arrives as `application/octet-stream`. An agent with no slots takes no typed files, so they all get a 415. If the lookup fails, the upload is refused with the error from the API, usually a 502, and the next upload tries again. Slots' `name_pattern` isn't checked here: the API checks it when the run starts. The slots are kept per `createSeclaiHandlers` instance, so where the handlers are created per request, as on Cloudflare Workers, every upload makes its own lookup.
-- **`onUpload`** receives the `File`, the `{ id, status, filename, content_type, file_size }` the handler would return, and the `Request`, whose body has already been read. Returning nothing keeps the default response. If it throws, the browser gets a 500 with a generic message. The file is already on Seclai by then.
+- **`onUpload`** receives the `File`, the `{ id, status, filename, content_type, file_size }` the handler would return, the `Request`, whose body has already been read, and the app's [context](#access-control), the same value the access-control hooks get. The context is resolved before the file is uploaded, so a `context` that refuses does so before the file reaches Seclai. Returning nothing keeps the default response. If it throws, the browser gets a 500 with a generic message. The file is already on Seclai by then.
 
 ### Access control
 
@@ -162,7 +162,13 @@ The context's type is inferred from the `context` option, or set as the type par
 
 ## Run callbacks
 
-`onEvent` and `onRunEnd` let the server see each run, for example to store a chat's history without trusting the browser to report it. Both get a `ctx` of `{ body, request }`: the validated `run` request body and the `Request` itself. It is the same object for every call in a run.
+`onEvent` and `onRunEnd` let the server see each run, for example to store a chat's history without trusting the browser to report it. Both get a `ctx` of `{ body, request, context }`:
+
+- `body` is the validated `run` request body, after any `authorizeRun` rewrite.
+- `request` is the `Request` itself.
+- `context` is the app's [context](#access-control), the same value the access-control hooks get, so a callback can save a reply for the signed-in user without working out who they are again.
+
+`ctx` is the same object for every call in a run. The context is resolved once per request and before the run starts, so a `context` that refuses does so before any credits are used.
 
 ```ts
 const seclai = createSeclaiHandlers({
