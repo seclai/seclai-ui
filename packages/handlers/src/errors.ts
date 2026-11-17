@@ -93,3 +93,19 @@ export function streamErrorMessage(err: unknown): string {
   }
   return "The connection to the Seclai API was lost.";
 }
+
+/**
+ * Log fields for anything thrown while calling the SDK: the upstream status
+ * and the API's message where there is one, so the server log shows the cause
+ * that a 502 hides from the browser.
+ */
+export function errorLogFields(err: unknown): Record<string, unknown> {
+  if (err instanceof SeclaiAPIStatusError) {
+    return {
+      upstream_status: err.statusCode,
+      error: upstreamMessage(err.responseText) ?? err.message,
+    };
+  }
+  if (err instanceof Error) return { error: err.message };
+  return { error: String(err) };
+}

@@ -28,7 +28,7 @@ With no API key, every tab runs on sample replies from `src/lib/demo.ts` and not
 | Image out | `SECLAI_AGENT_ID_IMAGE` | Any agent whose run output includes an image attachment |
 | Multi-turn chat | `SECLAI_AGENT_ID_CHAT` | Keys its conversation on `{{metadata.session_id}}` |
 
-Markdown renders as plain text and non-image files show as download links, because `MarkdownContent` and `MediaPreview` are still placeholders.
+Markdown renders as plain text, because `MarkdownContent` is still a placeholder. Images show as cards that open full size, but other files are download links until `MediaPreview` gets audio, video and PDF previews.
 
 ## Astro version
 

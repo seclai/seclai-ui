@@ -19,6 +19,26 @@ export interface AgentRunState {
   attachments: AgentAttachment[];
   error: string | null;
   runId: string | null;
+  /**
+   * When the current run started, from `Date.now()`. Kept once the run ends, so
+   * a UI can show how long it took. `null` until `start` is called, and again
+   * after `reset`.
+   */
+  startedAt: number | null;
+}
+
+/** One event from the run stream: the SSE event name and its parsed JSON data. */
+export type AgentRunEvent = SseEvent;
+
+export interface UseAgentRunOptions extends AgentEndpointOptions {
+  /**
+   * Called with each event read from the run stream, in order, as the hook
+   * applies it to the state. The latest callback is always used, so it can be
+   * an inline function. Events from a cancelled, reset or superseded run are
+   * not passed on. If it throws, the error is logged with `console.error` and
+   * the run carries on.
+   */
+  onEvent?(event: AgentRunEvent): void;
 }
 
 export interface StartRunOptions {
@@ -39,6 +59,13 @@ export interface UseAgentRunResult extends AgentRunState {
    * run on Seclai, which may carry on and use credits.
    */
   cancel(): void;
+  /**
+   * Return to `idle` and clear the state, stopping any stream in progress as
+   * `cancel` does. Like `cancel`, it doesn't stop the run on Seclai. A pending
+   * `start` still resolves, with `status: "cancelled"` and the run's last
+   * `text`, `runId` and `startedAt`, while the hook itself shows `idle`.
+   */
+  reset(): void;
 }
 
 const IDLE: AgentRunState = {
@@ -48,6 +75,7 @@ const IDLE: AgentRunState = {
   attachments: [],
   error: null,
   runId: null,
+  startedAt: null,
 };
 
 function toAttachments(
@@ -150,11 +178,16 @@ function applyEvent(
 }
 
 /** Run an agent through the handlers' `run` endpoint and track the event stream. */
-export function useAgentRun(options: AgentEndpointOptions = {}): UseAgentRunResult {
-  const { basePath, agentId } = options;
+export function useAgentRun(options: UseAgentRunOptions = {}): UseAgentRunResult {
+  const { basePath, agentId, onEvent } = options;
   const endpoints = useMemo(() => createEndpoints({ basePath, agentId }), [basePath, agentId]);
   const [state, setState] = useState<AgentRunState>(IDLE);
   const active = useRef<AbortController | null>(null);
+  // Read at each event, so a new callback takes effect without restarting the run.
+  const onEventRef = useRef(onEvent);
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  });
 
   // Stop streaming when the component goes away.
   useEffect(() => () => active.current?.abort(), []);
@@ -165,7 +198,7 @@ export function useAgentRun(options: AgentEndpointOptions = {}): UseAgentRunResu
       const controller = new AbortController();
       active.current = controller;
 
-      let current: AgentRunState = { ...IDLE, status: "running" };
+      let current: AgentRunState = { ...IDLE, status: "running", startedAt: Date.now() };
       // A superseded run must not write over the one that replaced it.
       const update = (next: AgentRunState) => {
         current = next;
@@ -190,11 +223,21 @@ export function useAgentRun(options: AgentEndpointOptions = {}): UseAgentRunResu
         }
 
         for await (const event of readSseStream(res.body)) {
+          // An event already buffered when the run was stopped is dropped.
+          if (controller.signal.aborted) break;
           update(applyEvent(current, event, endpoints));
+          try {
+            onEventRef.current?.(event);
+          } catch (err) {
+            // The caller's bug shouldn't fail the run.
+            console.error("useAgentRun: onEvent threw", err);
+          }
           if (current.status !== "running") break;
         }
 
-        if (current.status === "running") {
+        if (controller.signal.aborted) {
+          if (current.status === "running") update({ ...current, status: "cancelled" });
+        } else if (current.status === "running") {
           update({
             ...current,
             status: "failed",
@@ -219,5 +262,13 @@ export function useAgentRun(options: AgentEndpointOptions = {}): UseAgentRunResu
 
   const cancel = useCallback(() => active.current?.abort(), []);
 
-  return { ...state, start, cancel };
+  const reset = useCallback(() => {
+    // Clearing `active` first stops the aborted run from writing to the state.
+    const controller = active.current;
+    active.current = null;
+    controller?.abort();
+    setState(IDLE);
+  }, []);
+
+  return { ...state, start, cancel, reset };
 }

@@ -1,10 +1,33 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
-import { useAgentRun } from "../src";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { useAgentRun, type AgentRunEvent } from "../src";
 import { controlledResponse, jsonResponse, sse, sseResponse } from "./helpers";
 
 const RUN = "3f2b8c1e-7a4d-4e9b-9c11-0d5e6f7a8b9c";
+
+/**
+ * A run response that, unlike `controlledResponse`, keeps delivering after the
+ * request is aborted, to stand in for events already in flight.
+ */
+function lateResponse() {
+  const encoder = new TextEncoder();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+  });
+  return {
+    response: new Response(body),
+    push: (text: string) => controller.enqueue(encoder.encode(text)),
+    close: () => controller.close(),
+  };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function stubFetch(impl: (url: string, init?: RequestInit) => Promise<Response> | Response) {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => impl(url, init));
@@ -246,6 +269,296 @@ describe("useAgentRun", () => {
 
     unmount();
     expect(signal?.aborted).toBe(true);
+  });
+
+  describe("reset", () => {
+    it("is a no-op while idle", () => {
+      const { result } = renderHook(() => useAgentRun());
+      act(() => result.current.reset());
+      expect(result.current).toMatchObject({
+        status: "idle",
+        text: "",
+        steps: [],
+        attachments: [],
+        error: null,
+        runId: null,
+        startedAt: null,
+      });
+    });
+
+    it("clears a finished run", async () => {
+      stubFetch(() =>
+        sseResponse(
+          sse("init", { run_id: RUN }),
+          sse("step_progress", { step_id: "s1", step_name: "Think", message: "done" }),
+          sse("done", {
+            run_id: RUN,
+            status: "completed",
+            output: "Final",
+            attachments: [{ id: "f", name: "a.png", mime: "image/png", bytes: 1 }],
+          }),
+        ),
+      );
+      const { result } = renderHook(() => useAgentRun());
+      await act(() => result.current.start({ input: "hi" }));
+      expect(result.current.status).toBe("completed");
+      expect(result.current.attachments).toHaveLength(1);
+
+      act(() => result.current.reset());
+      expect(result.current).toMatchObject({
+        status: "idle",
+        text: "",
+        steps: [],
+        attachments: [],
+        error: null,
+        runId: null,
+        startedAt: null,
+      });
+    });
+
+    it("clears a failed run's error", async () => {
+      stubFetch(() => sseResponse(sse("error", { error: "boom" })));
+      const { result } = renderHook(() => useAgentRun());
+      await act(() => result.current.start({ input: "hi" }));
+      expect(result.current.error).toBe("boom");
+
+      act(() => result.current.reset());
+      expect(result.current.status).toBe("idle");
+      expect(result.current.error).toBeNull();
+    });
+
+    it("stops streaming a run in progress", async () => {
+      let signal: AbortSignal | null | undefined;
+      let feed!: ReturnType<typeof controlledResponse>;
+      stubFetch((_url, init) => {
+        signal = init?.signal;
+        feed = controlledResponse(signal);
+        return feed.response;
+      });
+      const { result } = renderHook(() => useAgentRun());
+
+      let finished!: Promise<unknown>;
+      act(() => {
+        finished = result.current.start({ input: "hi" });
+      });
+      await act(async () => feed.push(sse("stream_token", { token: "partial" })));
+      await waitFor(() => expect(result.current.text).toBe("partial"));
+
+      await act(async () => {
+        result.current.reset();
+        await finished;
+      });
+
+      expect(signal?.aborted).toBe(true);
+      expect(result.current.status).toBe("idle");
+      expect(result.current.text).toBe("");
+      expect(result.current.startedAt).toBeNull();
+    });
+
+    it("ignores events that arrive after it", async () => {
+      const onEvent = vi.fn();
+      let feed!: ReturnType<typeof lateResponse>;
+      stubFetch(() => {
+        feed = lateResponse();
+        return feed.response;
+      });
+      const { result } = renderHook(() => useAgentRun({ onEvent }));
+
+      let finished!: Promise<unknown>;
+      act(() => {
+        finished = result.current.start({ input: "hi" });
+      });
+      await act(async () => feed.push(sse("init", { run_id: RUN })));
+      await waitFor(() => expect(result.current.runId).toBe(RUN));
+
+      act(() => result.current.reset());
+      await act(async () => {
+        feed.push(sse("stream_token", { token: "late" }));
+        feed.push(sse("done", { run_id: RUN, status: "completed", output: "late" }));
+        feed.close();
+        await finished;
+      });
+
+      expect(result.current.status).toBe("idle");
+      expect(result.current.text).toBe("");
+      expect(result.current.runId).toBeNull();
+      expect(onEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves the hook ready for another run", async () => {
+      stubFetch(() => sseResponse(sse("done", { status: "completed", output: "again" })));
+      const { result } = renderHook(() => useAgentRun());
+      await act(() => result.current.start({ input: "hi" }));
+      act(() => result.current.reset());
+      await act(() => result.current.start({ input: "hi" }));
+      expect(result.current.status).toBe("completed");
+      expect(result.current.text).toBe("again");
+    });
+  });
+
+  it("does not apply an event that arrives after cancel", async () => {
+    let feed!: ReturnType<typeof lateResponse>;
+    stubFetch(() => {
+      feed = lateResponse();
+      return feed.response;
+    });
+    const { result } = renderHook(() => useAgentRun());
+
+    let finished!: Promise<unknown>;
+    act(() => {
+      finished = result.current.start({ input: "hi" });
+    });
+    await waitFor(() => expect(feed).toBeDefined());
+
+    await act(async () => {
+      result.current.cancel();
+      feed.push(sse("done", { status: "completed", output: "late" }));
+      feed.close();
+      await finished;
+    });
+
+    expect(result.current.status).toBe("cancelled");
+    expect(result.current.text).toBe("");
+  });
+
+  describe("startedAt", () => {
+    it("is set when start begins and kept after the run ends", async () => {
+      vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+      let feed!: ReturnType<typeof controlledResponse>;
+      stubFetch((_url, init) => {
+        feed = controlledResponse(init?.signal);
+        return feed.response;
+      });
+      const { result } = renderHook(() => useAgentRun());
+      expect(result.current.startedAt).toBeNull();
+
+      let finished!: Promise<unknown>;
+      act(() => {
+        finished = result.current.start({ input: "hi" });
+      });
+      expect(result.current.startedAt).toBe(1_700_000_000_000);
+
+      vi.spyOn(Date, "now").mockReturnValue(1_700_000_042_000);
+      await act(async () => {
+        feed.push(sse("done", { status: "completed", output: "ok" }));
+        feed.close();
+        await finished;
+      });
+      expect(result.current.status).toBe("completed");
+      expect(result.current.startedAt).toBe(1_700_000_000_000);
+
+      act(() => result.current.reset());
+      expect(result.current.startedAt).toBeNull();
+    });
+
+    it("is kept after a failure and is in the state start resolves with", async () => {
+      vi.spyOn(Date, "now").mockReturnValue(5);
+      stubFetch(() => jsonResponse({ error: "nope" }, 400));
+      const { result } = renderHook(() => useAgentRun());
+
+      let final: Awaited<ReturnType<typeof result.current.start>> | undefined;
+      await act(async () => {
+        final = await result.current.start({ input: "hi" });
+      });
+      expect(final?.startedAt).toBe(5);
+      expect(result.current.status).toBe("failed");
+      expect(result.current.startedAt).toBe(5);
+    });
+
+    it("is renewed by the next start", async () => {
+      stubFetch(() => sseResponse(sse("done", { status: "completed" })));
+      const { result } = renderHook(() => useAgentRun());
+      vi.spyOn(Date, "now").mockReturnValue(1);
+      await act(() => result.current.start({ input: "one" }));
+      vi.spyOn(Date, "now").mockReturnValue(2);
+      await act(() => result.current.start({ input: "two" }));
+      expect(result.current.startedAt).toBe(2);
+    });
+  });
+
+  describe("onEvent", () => {
+    it("receives every event in order, alongside the state", async () => {
+      const events: AgentRunEvent[] = [];
+      stubFetch(() =>
+        sseResponse(
+          sse("init", { run_id: RUN }),
+          sse("stream_token", { token: "a" }),
+          sse("unknown_event", { x: 1 }),
+          sse("done", { run_id: RUN, status: "completed", output: "a" }),
+        ),
+      );
+      const { result } = renderHook(() =>
+        useAgentRun({ onEvent: (event) => events.push(event) }),
+      );
+      await act(() => result.current.start({ input: "hi" }));
+
+      expect(events).toEqual([
+        { event: "init", data: { run_id: RUN } },
+        { event: "stream_token", data: { token: "a" } },
+        { event: "unknown_event", data: { x: 1 } },
+        { event: "done", data: { run_id: RUN, status: "completed", output: "a" } },
+      ]);
+      // The reducer still runs.
+      expect(result.current.status).toBe("completed");
+      expect(result.current.text).toBe("a");
+    });
+
+    it("uses the latest callback after a rerender, without restarting the run", async () => {
+      let feed!: ReturnType<typeof controlledResponse>;
+      const fetchMock = stubFetch((_url, init) => {
+        feed = controlledResponse(init?.signal);
+        return feed.response;
+      });
+      const first = vi.fn();
+      const second = vi.fn();
+      const { result, rerender } = renderHook(
+        ({ onEvent }: { onEvent: (event: AgentRunEvent) => void }) => useAgentRun({ onEvent }),
+        { initialProps: { onEvent: first } },
+      );
+
+      let finished!: Promise<unknown>;
+      act(() => {
+        finished = result.current.start({ input: "hi" });
+      });
+      await act(async () => feed.push(sse("stream_token", { token: "a" })));
+      await waitFor(() => expect(first).toHaveBeenCalledTimes(1));
+
+      rerender({ onEvent: second });
+      await act(async () => {
+        feed.push(sse("stream_token", { token: "b" }));
+        feed.push(sse("done", { status: "completed" }));
+        feed.close();
+        await finished;
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second.mock.calls.map(([e]) => e.event)).toEqual(["stream_token", "done"]);
+      expect(result.current.text).toBe("ab");
+    });
+
+    it("logs a throwing callback and carries on with the run", async () => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const boom = new Error("handler bug");
+      const onEvent = vi.fn(() => {
+        throw boom;
+      });
+      stubFetch(() =>
+        sseResponse(
+          sse("stream_token", { token: "a" }),
+          sse("done", { status: "completed", output: "done" }),
+        ),
+      );
+      const { result } = renderHook(() => useAgentRun({ onEvent }));
+      await act(() => result.current.start({ input: "hi" }));
+
+      expect(onEvent).toHaveBeenCalledTimes(2);
+      expect(consoleError).toHaveBeenCalledTimes(2);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("onEvent"), boom);
+      expect(result.current.status).toBe("completed");
+      expect(result.current.text).toBe("done");
+      expect(result.current.error).toBeNull();
+    });
   });
 
   it("renders on the server", () => {

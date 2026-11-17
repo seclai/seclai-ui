@@ -205,6 +205,9 @@ describe("AgentRunForm", () => {
       "attachmentId=doc",
     );
     expect(document.body.innerHTML).not.toContain("https://api/");
+    // The image is a card in a gallery, which opens it full size.
+    expect(screen.getByRole("button", { name: "Open out.png full size" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Download all/ })).toBeNull();
   });
 
   it("reports the result to onFinish", async () => {
@@ -333,6 +336,25 @@ describe("AgentChat", () => {
 
     await say(user, "draw a cat");
     expect(await screen.findByAltText("cat.png")).toBeTruthy();
+  });
+
+  it("numbers a turn's images and offers to download them all", async () => {
+    stubApi({
+      run: () =>
+        completed("Here are two", {
+          attachments: [
+            { id: "one", name: null, mime: "image/png", bytes: 1 },
+            { id: "two", name: null, mime: "image/png", bytes: 1 },
+          ],
+        }),
+    });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await say(user, "draw two cats");
+    expect(await screen.findByAltText("Image 1")).toBeTruthy();
+    expect(screen.getByAltText("Image 2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Download all 2" })).toBeTruthy();
   });
 });
 
@@ -890,8 +912,10 @@ describe("AgentChat saved sessions", () => {
     await waitFor(() => expect(store).toHaveLength(2));
     await act(async () => {});
 
+    // React's useId values (as on the gallery's viewer) differ between two
+    // renders, so they are blanked out.
     const transcript = (container: HTMLElement) =>
-      container.querySelector(".seclai-turns")!.innerHTML;
+      container.querySelector(".seclai-turns")!.innerHTML.replace(/_r_\w+_/g, "_r_");
     const before = transcript(live.container);
     expect(before).toContain("cat.png");
     expect(before).toContain("me.png");

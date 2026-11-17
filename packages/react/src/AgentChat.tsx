@@ -17,7 +17,7 @@ import {
 } from "./attachments";
 import { createEndpoints, uploadFile, type AgentEndpoints } from "./endpoints";
 import { MarkdownContent } from "./placeholders/MarkdownContent";
-import { MediaPreview } from "./placeholders/MediaPreview";
+import { MediaGallery } from "./media/MediaGallery";
 import type { AgentAttachment, AgentEndpointOptions } from "./types";
 import { useAgentRun } from "./useAgentRun";
 
@@ -224,13 +224,17 @@ function AssistantTurn({ turn, endpoints }: { turn: AgentChatTurn; endpoints: Ag
   return (
     <li className="seclai-turn seclai-turn-assistant">
       {turn.output && <MarkdownContent content={turn.output} />}
-      {runId &&
-        turn.attachments?.map(({ id, name, mime, bytes }) => (
-          <MediaPreview
-            key={id}
-            attachment={{ id, name, mime, bytes, url: endpoints.download(runId, id, name) }}
-          />
-        ))}
+      {runId && turn.attachments && turn.attachments.length > 0 && (
+        <MediaGallery
+          attachments={turn.attachments.map(({ id, name, mime, bytes }) => ({
+            id,
+            name,
+            mime,
+            bytes,
+            url: endpoints.download(runId, id, name),
+          }))}
+        />
+      )}
       {turn.error && (
         <p className="seclai-error" role="alert">
           {turn.error}

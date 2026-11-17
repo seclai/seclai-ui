@@ -11,11 +11,20 @@ export { AgentRunForm, type AgentRunFormProps } from "./AgentRunForm";
 export { SeclaiAgent, type SeclaiAgentProps } from "./SeclaiAgent";
 export {
   useAgentRun,
+  type AgentRunEvent,
   type AgentRunState,
   type StartRunOptions,
+  type UseAgentRunOptions,
   type UseAgentRunResult,
 } from "./useAgentRun";
-export { DEFAULT_BASE_PATH } from "./endpoints";
+export {
+  DEFAULT_BASE_PATH,
+  createEndpoints,
+  fetchAttachmentReferences,
+  uploadFile,
+  type AgentEndpoints,
+  type EndpointRequestOptions,
+} from "./endpoints";
 export type {
   AcceptedAttachmentSlot,
   AgentAttachment,
@@ -27,6 +36,16 @@ export type {
   UploadResult,
 } from "./types";
 
+// Media. MediaPreview previews images; audio, video and PDF are still to come.
+export {
+  MediaPreview,
+  type MediaAspectRatio,
+  type MediaPreviewProps,
+} from "./placeholders/MediaPreview";
+export { MediaGallery, type MediaGalleryProps } from "./media/MediaGallery";
+export { MediaSkeleton, type MediaSkeletonProps } from "./media/MediaSkeleton";
+export { MediaViewer, type MediaViewerProps } from "./media/MediaViewer";
+export { attachmentFileName } from "./media/files";
+
 // Placeholders, to be ported from the main Seclai app. See each file.
 export { MarkdownContent, type MarkdownContentProps } from "./placeholders/MarkdownContent";
-export { MediaPreview, type MediaPreviewProps } from "./placeholders/MediaPreview";
