@@ -9,11 +9,17 @@ export interface RunEvent {
 }
 
 /** What the run callbacks get besides the event or outcome. The same object for the whole run. */
-export interface RunCallbackContext {
-  /** The validated body of the `run` request. */
+export interface RunCallbackContext<Ctx = undefined> {
+  /** The validated body of the `run` request: after any `authorizeRun` rewrite. */
   body: RunRequestBody;
   /** The browser's request to the `run` handler. */
   request: Request;
+  /**
+   * The app's context for this request: what the `context` option returned, or
+   * what `withContext(ctx)` was given. The same value the access-control hooks
+   * get. `undefined` without either.
+   */
+  context: Ctx;
 }
 
 export type RunOutcomeStatus = "completed" | "failed" | "cancelled";
@@ -42,8 +48,14 @@ export interface RunOutcome {
   error: string | null;
 }
 
-export type RunEventCallback = (event: RunEvent, ctx: RunCallbackContext) => void | Promise<void>;
-export type RunEndCallback = (outcome: RunOutcome, ctx: RunCallbackContext) => void | Promise<void>;
+export type RunEventCallback<Ctx = undefined> = (
+  event: RunEvent,
+  ctx: RunCallbackContext<Ctx>,
+) => void | Promise<void>;
+export type RunEndCallback<Ctx = undefined> = (
+  outcome: RunOutcome,
+  ctx: RunCallbackContext<Ctx>,
+) => void | Promise<void>;
 
 const NO_RESULT_MESSAGE = "The stream ended without a result.";
 const TIMEOUT_MESSAGE = "Stopped waiting for the run. It may still finish on Seclai.";
@@ -90,9 +102,9 @@ function toAttachments(raw: unknown): RunOutcomeAttachment[] {
  * run ended is logged after they have handled it, so the line matches the
  * outcome they reported.
  */
-export function createRunObserver(
-  callbacks: { onEvent?: RunEventCallback; onRunEnd?: RunEndCallback; log?: RunLog },
-  ctx: RunCallbackContext,
+export function createRunObserver<Ctx>(
+  callbacks: { onEvent?: RunEventCallback<Ctx>; onRunEnd?: RunEndCallback<Ctx>; log?: RunLog },
+  ctx: RunCallbackContext<Ctx>,
   { keepReading = false }: { keepReading?: boolean } = {},
 ): RunStreamObserver {
   const { onEvent, onRunEnd, log } = callbacks;

@@ -999,7 +999,7 @@ describe("run callbacks", () => {
       abort,
       createRunObserver(
         { onEvent, onRunEnd: (o) => void outcomes.push(o) },
-        { body: { input: "hi" }, request: runRequest({ input: "hi" }) },
+        { body: { input: "hi" }, request: runRequest({ input: "hi" }), context: undefined },
       ),
     );
 
@@ -2120,6 +2120,118 @@ describe("deny", () => {
     expect(res.headers.get("content-type")).toBe("application/json");
     expect(res.headers.get("retry-after")).toBe("30");
     expect(await res.json()).toEqual({ error: "Slow down.", status: 429 });
+  });
+});
+
+describe("app context in the callbacks", () => {
+  type User = { userId: string };
+  const DONE = { event: "done", data: { run_id: RUN, status: "completed", output: "ok", attachments: [] } };
+  const uploadReq = () => {
+    const form = new FormData();
+    form.set("file", new File(["png"], "a.png", { type: "image/png" }));
+    return new Request(`${URL_BASE}/upload`, { method: "POST", body: form, headers: { "x-user": "u1" } });
+  };
+
+  beforeEach(() => {
+    client.runStreamingAgent.mockImplementation(() => eventsOf({ event: "init", data: { run_id: RUN } }, DONE));
+    client.uploadAgentInput.mockResolvedValue({ id: "up-1", status: "ready", filename: "a.png", content_type: "image/png", file_size: 3 });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("passes the `context` option's value to onEvent and onRunEnd, resolving it once per request", async () => {
+    const context = vi.fn(async (req: Request): Promise<User> => ({ userId: req.headers.get("x-user") ?? "" }));
+    const seenByEvent: User[] = [];
+    const seenByEnd: User[] = [];
+    const seclai = createSeclaiHandlers({
+      apiKey: "k",
+      agentId: AGENT,
+      context,
+      authorizeRun: () => {},
+      onEvent: (_e, { context: c }) => void seenByEvent.push(c),
+      onRunEnd: (_o, { context: c }) => void seenByEnd.push(c),
+    });
+
+    await (await seclai.run(runRequest({ input: "hi" }, { headers: { "x-user": "u1" } }))).text();
+
+    expect(seenByEvent).toEqual([{ userId: "u1" }, { userId: "u1" }]);
+    expect(seenByEnd).toEqual([{ userId: "u1" }]);
+    expect(context).toHaveBeenCalledOnce();
+  });
+
+  it("passes withContext's value to onRunEnd", async () => {
+    const seen: User[] = [];
+    const seclai = createSeclaiHandlers<User>({
+      apiKey: "k",
+      agentId: AGENT,
+      onRunEnd: (_o, { context: c }) => void seen.push(c),
+    });
+    await (await seclai.withContext({ userId: "from-framework" }).run(runRequest({ input: "hi" }))).text();
+    expect(seen).toEqual([{ userId: "from-framework" }]);
+  });
+
+  it("refuses the run before it starts when the context refuses", async () => {
+    const onRunEnd = vi.fn();
+    const seclai = createSeclaiHandlers({
+      apiKey: "k",
+      agentId: AGENT,
+      context: (): User => {
+        throw deny(401, "Sign in first.");
+      },
+      onRunEnd,
+    });
+    const res = await seclai.run(runRequest({ input: "hi" }));
+    expect(res.status).toBe(401);
+    expect(client.runStreamingAgent).not.toHaveBeenCalled();
+    expect(onRunEnd).not.toHaveBeenCalled();
+  });
+
+  it("gives onRunEnd an undefined context when there is none", async () => {
+    const seen: unknown[] = [];
+    const seclai = createSeclaiHandlers({ apiKey: "k", agentId: AGENT, onRunEnd: (_o, { context: c }) => void seen.push(c) });
+    await (await seclai.run(runRequest({ input: "hi" }))).text();
+    expect(seen).toEqual([undefined]);
+  });
+
+  it("passes the context to onUpload, resolved once with authorizeUpload", async () => {
+    const context = vi.fn(async (req: Request): Promise<User> => ({ userId: req.headers.get("x-user") ?? "" }));
+    const onUpload = vi.fn((_f: File, _r: unknown, _req: Request, _c: User) => {});
+    const seclai = createSeclaiHandlers({
+      apiKey: "k",
+      agentId: AGENT,
+      context,
+      authorizeUpload: () => {},
+      upload: { onUpload },
+    });
+
+    const res = await seclai.upload(uploadReq());
+
+    expect(res.status).toBe(200);
+    expect(onUpload.mock.calls[0]![3]).toEqual({ userId: "u1" });
+    expect(context).toHaveBeenCalledOnce();
+  });
+
+  it("refuses the upload before it reaches Seclai when the context refuses", async () => {
+    const onUpload = vi.fn();
+    const seclai = createSeclaiHandlers({
+      apiKey: "k",
+      agentId: AGENT,
+      context: (): User => {
+        throw deny(401, "Sign in first.");
+      },
+      upload: { onUpload },
+    });
+    const res = await seclai.upload(uploadReq());
+    expect(res.status).toBe(401);
+    expect(client.uploadAgentInput).not.toHaveBeenCalled();
+    expect(onUpload).not.toHaveBeenCalled();
+  });
+
+  it("doesn't resolve the context for a run or upload with no callbacks or hooks", async () => {
+    const context = vi.fn(async (): Promise<User> => ({ userId: "u1" }));
+    const seclai = createSeclaiHandlers({ apiKey: "k", agentId: AGENT, context });
+    await (await seclai.run(runRequest({ input: "hi" }))).text();
+    await seclai.upload(uploadReq());
+    expect(context).not.toHaveBeenCalled();
   });
 });
 

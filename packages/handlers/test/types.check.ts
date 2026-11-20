@@ -49,3 +49,26 @@ const optional = createSeclaiHandlers<{ userId: string } | undefined>({
 optional.handle;
 optional.withContext(undefined).handle;
 void nextRoute;
+
+// The callbacks get the same context as the hooks.
+const withCallbacks = createSeclaiHandlers({
+  apiKey: "k",
+  agentId: "a",
+  context: async () => ({ userId: "u1" }),
+  onRunEnd: (_outcome, { context }) => {
+    const id: string = context.userId;
+    void id;
+  },
+  onEvent: (_event, { context }) => void context.userId.length,
+  upload: {
+    onUpload: (_file, _result, _req, context) => void context.userId.length,
+  },
+});
+withCallbacks.handle;
+
+createSeclaiHandlers({
+  apiKey: "k",
+  agentId: "a",
+  // @ts-expect-error Without a context, the callbacks' context is undefined.
+  onRunEnd: (_outcome, { context }) => void context.userId,
+});
