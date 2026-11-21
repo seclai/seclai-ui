@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -358,6 +360,22 @@ describe("MarkdownContent", () => {
       expect(blocks()).toEqual(["p"]);
       expect(root.querySelector("ul, strong")).toBeNull();
     });
+  });
+});
+
+// Safari before 16.4 can't parse a regex lookbehind, and one anywhere in the
+// bundle stops the whole package from loading there.
+describe("browser support", () => {
+  it("uses no regex lookbehind in the source", () => {
+    const src = join(import.meta.dirname, "../src");
+    const files = readdirSync(src, { recursive: true, encoding: "utf8" }).filter((file) => /\.tsx?$/.test(file));
+    expect(files).toContain(join("placeholders", "MarkdownContent.tsx"));
+    for (const file of files) {
+      expect({ file, lookbehind: /\(\?<[=!]/.test(readFileSync(join(src, file), "utf8")) }).toEqual({
+        file,
+        lookbehind: false,
+      });
+    }
   });
 });
 
