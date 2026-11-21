@@ -4,9 +4,14 @@ import {
   type AcceptedAttachmentSlot,
   type ApiVersion,
 } from "@seclai/sdk";
-import { errorLogFields, json, jsonError, toErrorResponse } from "./errors";
+import { errorLogFields, json, jsonError, toErrorBody, toErrorResponse } from "./errors";
 import { safeLogger, type SeclaiLogger } from "./logger";
-import { createRunObserver, type RunEndCallback, type RunEventCallback } from "./run-callbacks";
+import {
+  createRunObserver,
+  reportRefusedRun,
+  type RunEndCallback,
+  type RunEventCallback,
+} from "./run-callbacks";
 import { startRunLog } from "./run-log";
 import { relayRunEvents, SSE_HEADERS } from "./sse";
 
@@ -152,10 +157,15 @@ export interface SeclaiHandlersOptions<Ctx = undefined> {
    */
   onEvent?: RunEventCallback<Ctx>;
   /**
-   * Called exactly once for each run that started streaming, with how it ended.
-   * Awaited before the final `done`, `error` or `timeout` event is relayed, so
-   * whatever it stores is in place when the browser sees the run end. If it
-   * throws, the browser gets an `error` event instead.
+   * Called exactly once for each run, with how it ended. Awaited before the
+   * final `done`, `error` or `timeout` event is relayed, so whatever it stores
+   * is in place when the browser sees the run end. If it throws, the browser
+   * gets an `error` event instead.
+   *
+   * Also called, with `status: "failed"`, when the API refuses the run before
+   * it streams, and awaited before the error response is returned. A throw
+   * there is only logged. Not called when `authorizeRun`, `context` or the
+   * body check refuses the run.
    */
   onRunEnd?: RunEndCallback<Ctx>;
   /**
@@ -732,11 +742,19 @@ export function createSeclaiHandlers<Ctx>(
             { headers: SSE_HEADERS },
           );
         } catch (err) {
-          const res = toErrorResponse(err);
+          const error = toErrorBody(err);
           // The browser left while the stream was connecting, which aborted it.
-          if (!keepReading && req.signal?.aborted) log?.disconnected();
-          else log?.rejected(err, res.status);
-          return res;
+          const browserLeft = !keepReading && !!req.signal?.aborted;
+          // Awaited, so whatever it stores is in place when the browser sees
+          // the error. It never throws.
+          await reportRefusedRun(
+            { onRunEnd, log },
+            { body, request: req, context: runContext as Ctx },
+            browserLeft ? { cancelled: true } : { error: error.error },
+          );
+          if (browserLeft) log?.disconnected();
+          else log?.rejected(err, error.status);
+          return json(error, error.status);
         }
       },
 
