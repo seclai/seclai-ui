@@ -51,7 +51,7 @@ export function MediaGallery({
     setDownloading(true);
     try {
       await saveFiles(
-        images.map((image, i) => ({ url: image.url, filename: attachmentFileName(image, i + 1) })),
+        images.map((image, i) => ({ source: image.url, filename: attachmentFileName(image, i + 1) })),
         { delayMs: DOWNLOAD_ALL_DELAY_MS, signal: controller.signal },
       );
     } finally {

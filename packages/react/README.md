@@ -264,7 +264,7 @@ import { MediaGallery, saveFile } from "@seclai/react";
 Here `toJpeg` is your own code that draws the image on a canvas and returns `canvas.toBlob()`'s result.
 
 - **`saveFile(urlOrBlob, filename)`** saves a URL or a `Blob` through a temporary `<a download>`. A URL that isn't `http:`, `https:`, `blob:` or relative (such as `javascript:`) is skipped with a warning. For a `Blob` it makes an object URL and revokes it 40 seconds later, once the browser has had time to start the download. Without a `document`, as in server rendering, it does nothing.
-- **`saveFiles(files, { delayMs, signal })`** saves `{ url, filename }` files one at a time with `saveFile`, waiting `delayMs` (400 ms) between them, as "Download all" does. A `url` can be a `Blob` too. It stops when `signal` aborts.
+- **`saveFiles(files, { delayMs, signal })`** saves `{ source, filename }` files one at a time with `saveFile`, waiting `delayMs` (400 ms) between them, as "Download all" does. A `source` is a URL or a `Blob`. It stops when `signal` aborts.
 
 ## Placeholders
 

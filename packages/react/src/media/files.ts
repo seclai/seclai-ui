@@ -103,7 +103,8 @@ export function saveFile(urlOrBlob: string | Blob, filename: string): void {
 
 /** A file for `saveFiles`: a URL or a `Blob`, and the name to save it as. */
 export interface SaveFilesEntry {
-  url: string | Blob;
+  /** A URL, checked as `saveFile` checks it, or a `Blob`. */
+  source: string | Blob;
   filename: string;
 }
 
@@ -127,7 +128,7 @@ export async function saveFiles(
     if (signal?.aborted) return;
     if (i > 0) await wait(delayMs, signal);
     if (signal?.aborted) return;
-    saveFile(file.url, file.filename);
+    saveFile(file.source, file.filename);
   }
 }
 

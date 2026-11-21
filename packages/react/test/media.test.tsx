@@ -404,8 +404,8 @@ describe("saveFile", () => {
       vi.useFakeTimers();
       const saved = recordClicks();
       const done = saveFiles([
-        { url: "/a.png", filename: "a.png" },
-        { url: new Blob(["b"]), filename: "b.jpg" },
+        { source: "/a.png", filename: "a.png" },
+        { source: new Blob(["b"]), filename: "b.jpg" },
       ]);
       await vi.advanceTimersByTimeAsync(400);
       await done;
@@ -426,7 +426,7 @@ describe("saveFile", () => {
 });
 
 describe("saveFiles", () => {
-  const files = ["a", "b", "c"].map((id) => ({ url: `/files/${id}.png`, filename: `${id}.png` }));
+  const files = ["a", "b", "c"].map((id) => ({ source: `/files/${id}.png`, filename: `${id}.png` }));
 
   function recordClicks() {
     const saved: string[] = [];
