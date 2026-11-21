@@ -1204,7 +1204,11 @@ describe("run callbacks", () => {
     it.each([
       ["a hidden credentials error", statusError(401), "The Seclai API rejected the server's credentials. Check SECLAI_API_KEY."],
       ["an unreachable API", new Error("secret-key exploded"), "Could not reach the Seclai API."],
-      ["a timeout before the first event", new SeclaiStreamingError("Timed out"), "Timed out waiting for the Seclai API."],
+      [
+        "a timeout before the first event",
+        new SeclaiStreamingError("Timed out"),
+        "Timed out waiting for the Seclai API. The run may still finish on Seclai.",
+      ],
     ])("reports the browser's message, not the cause, for %s", async (_label, err, message) => {
       refuse(err);
       const outcomes: RunOutcome[] = [];

@@ -91,6 +91,19 @@ export function toErrorBody(err: unknown): ErrorBody {
   return { error: "Could not reach the Seclai API.", status: 502 };
 }
 
+/**
+ * {@link toErrorBody} for a run that failed before its first event. A timeout
+ * there may come after the API accepted the run, so the message says it may
+ * still finish, as the stream's own `timeout` does.
+ */
+export function runErrorBody(err: unknown): ErrorBody {
+  const body = toErrorBody(err);
+  if (err instanceof SeclaiStreamingError) {
+    body.error = "Timed out waiting for the Seclai API. The run may still finish on Seclai.";
+  }
+  return body;
+}
+
 /** Turn anything thrown while calling the SDK into a response for the browser. See {@link toErrorBody}. */
 export function toErrorResponse(err: unknown): Response {
   const body = toErrorBody(err);

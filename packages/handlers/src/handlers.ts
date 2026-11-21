@@ -4,7 +4,7 @@ import {
   type AcceptedAttachmentSlot,
   type ApiVersion,
 } from "@seclai/sdk";
-import { errorLogFields, json, jsonError, toErrorBody, toErrorResponse } from "./errors";
+import { errorLogFields, json, jsonError, runErrorBody, toErrorResponse } from "./errors";
 import { safeLogger, type SeclaiLogger } from "./logger";
 import {
   createRunObserver,
@@ -744,7 +744,7 @@ export function createSeclaiHandlers<Ctx>(
             { headers: SSE_HEADERS },
           );
         } catch (err) {
-          const error = toErrorBody(err);
+          const error = runErrorBody(err);
           // The browser left while the stream was connecting, which aborted it.
           const browserLeft = !keepReading && !!req.signal?.aborted;
           // Awaited, so whatever it stores is in place when the browser sees
