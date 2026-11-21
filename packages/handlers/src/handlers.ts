@@ -163,9 +163,11 @@ export interface SeclaiHandlersOptions<Ctx = undefined> {
    * gets an `error` event instead.
    *
    * Also called, with `status: "failed"`, when the API refuses the run before
-   * it streams, and awaited before the error response is returned. A throw
-   * there is only logged. Not called when `authorizeRun`, `context` or the
-   * body check refuses the run.
+   * it streams, or it fails before its first event (the API can't be reached,
+   * or `runTimeoutMs` runs out), and awaited before the error response is
+   * returned. The status is `cancelled` instead if the browser left while the
+   * stream was connecting. A throw there is only logged. Not called when
+   * `authorizeRun`, `context` or the body check refuses the run.
    */
   onRunEnd?: RunEndCallback<Ctx>;
   /**
