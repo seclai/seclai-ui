@@ -370,7 +370,7 @@
   inset: -8px;
 }
 
-/* Agent output: paragraphs, lists and bold. The list numbers are badges, below. */
+/* Agent output: paragraphs, lists, rules and bold. The list numbers are badges, below. */
 .seclai-markdown {
   overflow-wrap: anywhere;
 }
@@ -413,6 +413,27 @@
 
 .seclai-markdown ol > li > :last-child {
   min-width: 0;
+}
+
+/* A list nested in an item sits under the item's text, inset by the parent's
+   badge or bullet. A nested numbered list keeps its badges. */
+.seclai-markdown li ul,
+.seclai-markdown li ol {
+  margin: 6px 0 0;
+}
+
+.seclai-markdown ul ul {
+  list-style: circle;
+}
+
+.seclai-markdown ul ul ul {
+  list-style: square;
+}
+
+.seclai-markdown hr {
+  height: 0;
+  border: 0;
+  border-block-start: 1px solid var(--seclai-border);
 }
 
 .seclai-media {

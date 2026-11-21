@@ -184,6 +184,104 @@ describe("MarkdownContent", () => {
     expect(root.querySelector("strong")!.textContent).toBe("<b>hi</b>");
   });
 
+  it("renders ---, ***, ___ and spaced forms as a rule", () => {
+    for (const rule of ["---", "***", "___", "* * *", "- - -", "_ _ _", "  ----  ", "*\t*\t*"]) {
+      const { root, blocks } = md(rule);
+      expect(blocks()).toEqual(["hr"]);
+      expect(root.querySelector("ul, li")).toBeNull();
+    }
+  });
+
+  it("ends a paragraph or a list at a rule", () => {
+    const { root, blocks } = md("Intro\n---\n- One\n* * *\n1. Two\n___\nOutro");
+    expect(blocks()).toEqual(["p", "hr", "ul", "hr", "ol", "hr", "p"]);
+    expect(root.querySelector("ul")!.textContent).toBe("One");
+    expect(items(root.querySelector("ol")!)[0]!.text).toBe("Two");
+  });
+
+  it("leaves --, ** and -- note as text", () => {
+    const { root, blocks } = md("--\n\n**\n\n-- note");
+    expect(blocks()).toEqual(["p", "p", "p"]);
+    expect(root.querySelector("hr, ul, strong")).toBeNull();
+    expect(root.textContent).toBe("--**-- note");
+  });
+
+  it("keeps a rule inside a code fence literal", () => {
+    const { root, blocks } = md("```\n---\n* * *\n```");
+    expect(blocks()).toEqual(["p"]);
+    expect(root.querySelector("hr, ul")).toBeNull();
+    expect(root.textContent).toBe("```---* * *```");
+  });
+
+  it("nests an indented item under the item before it", () => {
+    const { root, blocks } = md("- Fruit\n  - Apple\n  - Pear\n- Veg");
+    expect(blocks()).toEqual(["ul"]);
+    const top = root.querySelector("ul")!;
+    expect(top.querySelectorAll(":scope > li")).toHaveLength(2);
+    const nested = top.querySelector(":scope > li > ul")!;
+    expect([...nested.children].map((li) => li.textContent)).toEqual(["Apple", "Pear"]);
+    expect(top.lastElementChild!.textContent).toBe("Veg");
+  });
+
+  it("needs at least 2 more spaces, or a tab, to nest", () => {
+    const { root } = md("- One\n - Two\n\t- Three");
+    const top = root.querySelector("ul")!;
+    expect(top.querySelectorAll(":scope > li")).toHaveLength(2);
+    expect(top.querySelector("li li")!.textContent).toBe("Three");
+  });
+
+  it("nests three levels of mixed lists and dedents back out", () => {
+    const content = [
+      "1. Thumbnails",
+      "   - Red",
+      "     1. Bold title",
+      "     2. Small title",
+      "        More detail",
+      "   - Blue",
+      "2. Video",
+      "   3. Intro",
+      "- Notes",
+    ].join("\n");
+    const { root, blocks } = md(content);
+    expect(blocks()).toEqual(["ol", "ul"]);
+
+    const top = root.querySelector("ol")!;
+    expect(items(top).map((item) => [item.value, item.number])).toEqual([
+      [1, "1"],
+      [2, "2"],
+    ]);
+    const [first, second] = top.querySelectorAll(":scope > li");
+    const colours = first!.querySelector("ul")!;
+    expect(colours.querySelectorAll(":scope > li")).toHaveLength(2);
+
+    const titles = colours.querySelector("ol")!;
+    expect(titles.getAttribute("role")).toBe("list");
+    expect(titles.start).toBe(1);
+    expect(items(titles)).toEqual([
+      { value: 1, number: "1", text: "Bold title" },
+      { value: 2, number: "2", text: "Small titleMore detail" },
+    ]);
+    expect(colours.lastElementChild!.textContent).toBe("Blue");
+
+    const intro = second!.querySelector("ol")!;
+    expect(intro.start).toBe(3);
+    expect(items(intro)).toEqual([{ value: 3, number: "3", text: "Intro" }]);
+    expect(root.lastElementChild!.textContent).toBe("Notes");
+  });
+
+  it("starts a new list at a level when the marker kind changes", () => {
+    const { root } = md("- Parent\n  - Bullet\n  1. Number");
+    const parent = root.querySelector("ul > li")!;
+    expect([...parent.children].map((el) => el.tagName.toLowerCase())).toEqual(["ul", "ol"]);
+  });
+
+  it("keeps nested items in their list across blank lines", () => {
+    const { root, blocks } = md("1. One\n\n   - Sub\n\n   - Sub two\n\n2. Two\n\nAfter");
+    expect(blocks()).toEqual(["ol", "p"]);
+    expect(root.querySelectorAll("ol > li > div > ul > li")).toHaveLength(2);
+    expect(items(root.querySelector("ol")!).map((item) => item.value)).toEqual([1, 2]);
+  });
+
   describe("while streaming", () => {
     it("shows a marker with nothing after it as text", () => {
       for (const partial of ["1.", "1. ", "2)", "- ", "*", "•"]) {
@@ -202,6 +300,42 @@ describe("MarkdownContent", () => {
       rerender("1. Sunset\n2. Beach");
       expect(blocks()).toEqual(["ol"]);
       expect(items(root.querySelector("ol")!).map((item) => item.value)).toEqual([1, 2]);
+    });
+
+    it("shows the next item's bare number, before its dot, on its own line", () => {
+      for (const partial of ["2", "  2 ", "12", "2. "]) {
+        const { root, blocks } = md(`1. Sunset\n${partial}`);
+        expect(blocks()).toEqual(["ol", "p"]);
+        expect(items(root.querySelector("ol")!)[0]!.text).toBe("Sunset");
+        expect(root.querySelector("p")!.textContent).toBe(partial);
+      }
+    });
+
+    it("shows a rule's first characters as text, not a bullet", () => {
+      for (const partial of ["-", "*", "_", "- -", "* *", "_ _", "--", "**", "- *"]) {
+        const { root, blocks } = md(partial);
+        expect(blocks()).toEqual(["p"]);
+        expect(root.textContent).toBe(partial);
+      }
+    });
+
+    it("shows a rule's first characters after an item on their own line, then the rule", () => {
+      const { root, blocks, rerender } = md("- One\n- -");
+      expect(blocks()).toEqual(["ul", "p"]);
+      expect(root.querySelector("li")!.textContent).toBe("One");
+
+      rerender("- One\n- - -");
+      expect(blocks()).toEqual(["ul", "hr"]);
+    });
+
+    it("shows a nested item's marker as text until its text arrives", () => {
+      const { root, blocks, rerender } = md("1. One\n   -");
+      expect(blocks()).toEqual(["ol", "p"]);
+      expect(items(root.querySelector("ol")!)[0]!.text).toBe("One");
+
+      rerender("1. One\n   - Sub");
+      expect(blocks()).toEqual(["ol"]);
+      expect(root.querySelector("ol li ul li")!.textContent).toBe("Sub");
     });
 
     it("shows an unclosed ** as text, then bold once it closes", () => {
