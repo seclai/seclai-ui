@@ -695,8 +695,13 @@ export function createSeclaiHandlers<Ctx>(
         const abort = () => upstream.abort();
         const keepReading = keepReadingAfterDisconnect && !!(onEvent || onRunEnd);
         // Kept reading, the run isn't tied to the browser's request: the relay
-        // reads it to the end instead when the browser goes away.
-        if (!keepReading) req.signal?.addEventListener("abort", abort, { once: true });
+        // reads it to the end instead when the browser goes away. A browser
+        // that already left, while `authorizeRun` or `context` ran, fires no
+        // event, so the run is cancelled before it's sent.
+        if (!keepReading) {
+          if (req.signal?.aborted) abort();
+          else req.signal?.addEventListener("abort", abort, { once: true });
+        }
 
         const log =
           logger &&
@@ -745,9 +750,9 @@ export function createSeclaiHandlers<Ctx>(
           );
         } catch (err) {
           const error = runErrorBody(err);
-          // The browser left while the stream was connecting, which aborted it.
-          // Checked on the upstream, not the request: a browser that left
-          // before the listener was added didn't abort it, so whatever the API
+          // The browser left before or while the stream was connecting, which
+          // aborted it. Checked on the upstream, not the request: with
+          // `keepReadingAfterDisconnect` it isn't aborted, so whatever the API
           // answered is the real outcome.
           const browserLeft = upstream.signal.aborted;
           // Awaited, so whatever it stores is in place when the browser sees

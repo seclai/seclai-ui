@@ -1332,9 +1332,13 @@ describe("run callbacks", () => {
       expect(outcomes).toEqual([{ runId: null, status: "cancelled", output: "", attachments: [], error: null }]);
     });
 
-    it("reports the refusal as failed when the browser left before the stream was sent, so it wasn't aborted", async () => {
+    it("cancels the run before it's sent when the browser left while authorizeRun ran", async () => {
       const browser = new AbortController();
-      refuse();
+      // As fetch does with an aborted signal: fails without sending anything.
+      client.runStreamingAgent.mockImplementation(async function* (_agent: string, _body: unknown, opts: { signal: AbortSignal }) {
+        if (opts.signal.aborted) throw new DOMException("aborted", "AbortError");
+        yield { event: "init", data: { run_id: RUN } };
+      });
       const outcomes: RunOutcome[] = [];
 
       await createSeclaiHandlers({
@@ -1346,10 +1350,8 @@ describe("run callbacks", () => {
         onRunEnd: (o) => void outcomes.push(o),
       }).run(runRequest({ input: "hi" }, { signal: browser.signal }));
 
-      expect(client.runStreamingAgent.mock.calls[0]![2].signal.aborted).toBe(false);
-      expect(outcomes).toEqual([
-        { runId: null, status: "failed", output: "", attachments: [], error: "Out of credits" },
-      ]);
+      expect(client.runStreamingAgent.mock.calls[0]![2].signal.aborted).toBe(true);
+      expect(outcomes).toEqual([{ runId: null, status: "cancelled", output: "", attachments: [], error: null }]);
     });
 
     it("with keepReadingAfterDisconnect, reports the refusal as failed even if the browser left", async () => {
