@@ -365,6 +365,18 @@ describe("MarkdownContent", () => {
 
 // Safari before 16.4 can't parse a regex lookbehind, and one anywhere in the
 // bundle stops the whole package from loading there.
+describe("performance", () => {
+  // A marker then a long run of spaces used to backtrack quadratically in the
+  // bare-marker check: about 5 seconds per render at this length.
+  it.each(["-", "*", "_", "•"])("renders %s followed by a long run of spaces quickly", (marker) => {
+    const content = `${marker}${" ".repeat(100_000)}x`;
+    const start = performance.now();
+    const { root } = md(content);
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(root.textContent).toContain("x");
+  });
+});
+
 describe("browser support", () => {
   it("uses no regex lookbehind in the source", () => {
     const src = join(import.meta.dirname, "../src");

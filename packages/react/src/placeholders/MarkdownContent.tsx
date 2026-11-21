@@ -36,7 +36,10 @@ const BULLET = /^(\s*)[-*•]\s+(\S.*)$/;
 // A line that may still become a list item or a break while it streams in: a
 // bare "2", "2." or "-", or only marker characters, such as "- -" or "**". It
 // isn't a bullet, and it doesn't join the item before it.
-const BARE_MARKER = /^\s*(?:\d{1,9}[.)]?|[-*•_][-*_\s]*)\s*$/;
+// The trailing spaces belong to each branch, not after both: a shared `\s*` would
+// overlap `[-*_\s]*`, and a marker then a long run of spaces would backtrack
+// quadratically on every streamed token.
+const BARE_MARKER = /^\s*(?:\d{1,9}[.)]?\s*|[-*•_][-*_\s]*)$/;
 // Three or more of the same "-", "*" or "_", optionally spaced: "---", "* * *".
 const THEMATIC_BREAK = /^\s*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 // An item is nested under the item before it when its marker is indented at
