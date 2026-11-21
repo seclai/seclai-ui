@@ -16,6 +16,7 @@ export type {
   SeclaiHandlersOptions,
   SeclaiUploadOptions,
   UnboundSeclaiHandlers,
+  UploadParams,
   UploadResult,
   WithContext,
 } from "./handlers";

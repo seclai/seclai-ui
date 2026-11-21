@@ -57,7 +57,7 @@ export const ALL: APIRoute = ({ request }) => seclai.handle(request);
 | `keepReadingAfterDisconnect` | `false` | Keep reading a run after the browser leaves, so `onRunEnd` gets its real outcome. See [Saving replies after a disconnect](#saving-replies-after-a-disconnect) |
 | `context` | None | `(req)`: your per-request context, such as the signed-in user, passed to every hook. See [Access control](#access-control) |
 | `authorizeRun` | None | `(req, body, ctx)`: refuse or rewrite a run. See [Access control](#access-control) |
-| `authorizeUpload` | None | `(req, file, ctx)`: refuse an upload before it reaches Seclai |
+| `authorizeUpload` | None | `(req, file, ctx, params)`: refuse an upload before it reaches Seclai. See [Upload params](#upload-params) |
 | `authorizeDownload` | None | `(req, { runId, attachmentId }, ctx)`: return `true` to serve the file |
 | `upload` | None | Size limit, content-type check and hook for `upload`, below |
 | `logger` | None | `{ debug, info, warn, error }`, such as `console`: gets a line for each step of a run, upload and download. See [Logging](#logging) |
@@ -82,13 +82,42 @@ const seclai = createSeclaiHandlers({
 |---|---|---|
 | `maxBytes` | No limit | Largest file accepted, in bytes. A bigger one gets a 413 |
 | `checkContentType` | `false` | Give a 415 to a file whose type none of the agent's attachment slots accepts |
-| `onUpload(file, result, req, context)` | None | Called after a successful upload. Return a `Response` to replace the default JSON |
+| `onUpload(file, result, req, context, params)` | None | Called after a successful upload. Return a `Response` to replace the default JSON |
 
 The size checks and the content-type check refuse a file before it reaches the API, and `onUpload` runs only after the API has accepted one. In order, `upload` checks the size, then calls [`authorizeUpload`](#access-control), then checks the content type, so a refused caller never triggers the slot lookup.
 
 - **`maxBytes`** is checked against `content-length` first, so a request that declares an oversized body is refused before it's read. Without `content-length`, as with a chunked body, the bytes are counted as they stream and reading stops with a 413 once they pass the limit. Both checks allow 64 KB for the multipart envelope, and the file's own size is checked once the form is read.
 - **`checkContentType`** reads the slots with `getAgentAttachmentReferences` and reuses them for 60 seconds, so an edit to the agent's slots takes up to a minute to apply. A slot type is exact, like `application/pdf`, or a wildcard, like `image/*`. A slot with no types accepts every file. A file of unknown type isn't checked and goes on to the API, which decides: browsers send no type for `.md`, some `.csv` files or HEIC on Windows, and such a file arrives as `application/octet-stream`. An agent with no slots takes no typed files, so they all get a 415. If the lookup fails, the upload is refused with the error from the API, usually a 502, and the next upload tries again. Slots' `name_pattern` isn't checked here: the API checks it when the run starts. The slots are kept per `createSeclaiHandlers` instance, so where the handlers are created per request, as on Cloudflare Workers, every upload makes its own lookup.
-- **`onUpload`** receives the `File`, the `{ id, status, filename, content_type, file_size }` the handler would return, the `Request`, whose body has already been read, and the app's [context](#access-control), the same value the access-control hooks get. The context is resolved before the file is uploaded, so a `context` that refuses does so before the file reaches Seclai. Returning nothing keeps the default response. If it throws, the browser gets a 500 with a generic message. The file is already on Seclai by then.
+- **`onUpload`** receives the `File`, the `{ id, status, filename, content_type, file_size }` the handler would return, the `Request`, whose body has already been read, and the app's [context](#access-control), the same value the access-control hooks get, and the [upload params](#upload-params). The context is resolved before the file is uploaded, so a `context` that refuses does so before the file reaches Seclai. Returning nothing keeps the default response. If it throws, the browser gets a 500 with a generic message. The file is already on Seclai by then.
+
+### Upload params
+
+The browser can send a little app data with an upload, such as the session the file belongs to or its role, with `uploadFile`'s `params` option in `@seclai/react`. They arrive in the upload URL's query string, and `authorizeUpload` and `onUpload` get them parsed, as their last argument:
+
+```ts
+const seclai = createSeclaiHandlers({
+  apiKey: process.env.SECLAI_API_KEY!,
+  agentId: process.env.SECLAI_AGENT_ID!,
+  context: async (req) => ({ user: await getUser(req) }),
+
+  async authorizeUpload(req, file, { user }, { sessionId, kind }) {
+    if (!sessionId || !(await db.sessionBelongsTo(sessionId, user.id))) return false;
+    if (kind !== "headshot" && kind !== "style") return deny(400, "Unknown kind of upload.");
+  },
+
+  upload: {
+    // Return your own record instead of the default JSON.
+    async onUpload(file, result, req, { user }, { sessionId, kind }) {
+      const record = await db.saveUpload({ userId: user.id, sessionId, kind, uploadId: result.id });
+      return Response.json(record);
+    },
+  },
+});
+```
+
+- **They come from the browser.** The handler doesn't check them and doesn't use them itself: validate them, and check that the user may use them, in `authorizeUpload`. `onUpload` gets the same values.
+- **Strings only.** `params` is a `Record<string, string>`. When a key is repeated, the last value wins. Without a query string it's an empty object. It has no prototype, so a key the browser didn't send reads as `undefined`.
+- **Visible.** They're in the URL, so they show up in server logs. Keep secrets out of them.
 
 ### Access control
 

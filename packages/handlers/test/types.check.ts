@@ -66,6 +66,23 @@ const withCallbacks = createSeclaiHandlers({
 });
 withCallbacks.handle;
 
+// The upload hooks get the query params as strings, after the context.
+createSeclaiHandlers({
+  apiKey: "k",
+  agentId: "a",
+  authorizeUpload: (_req, _file, _ctx, params) => {
+    const sessionId: string | undefined = params.sessionId;
+    void sessionId;
+  },
+  upload: {
+    onUpload: (_file, _result, _req, _ctx, { kind }) => {
+      // @ts-expect-error The params are strings.
+      const n: number = kind;
+      void n;
+    },
+  },
+});
+
 createSeclaiHandlers({
   apiKey: "k",
   agentId: "a",

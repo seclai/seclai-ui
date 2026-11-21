@@ -1993,6 +1993,62 @@ describe("authorizeUpload", () => {
       expect(onUpload).toHaveBeenCalledOnce();
     });
   });
+
+  describe("upload params", () => {
+    const withParams = (
+      hook: SeclaiHandlersOptions["authorizeUpload"],
+      onUpload: SeclaiUploadOptions["onUpload"],
+    ) => createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, authorizeUpload: hook, upload: { onUpload } });
+    const requestWithQuery = (query: string) => {
+      const form = new FormData();
+      form.set("file", new File(["png"], "a.png", { type: "image/png" }));
+      return new Request(`${URL_BASE}/upload${query}`, { method: "POST", body: form });
+    };
+
+    it("passes the query params to authorizeUpload and onUpload", async () => {
+      const hook = vi.fn();
+      const onUpload = vi.fn();
+      const res = await withParams(hook, onUpload).upload(
+        requestWithQuery("?sessionId=s%201&kind=headshot"),
+      );
+
+      expect(res.status).toBe(200);
+      const expected = { sessionId: "s 1", kind: "headshot" };
+      expect({ ...hook.mock.calls[0]![3] }).toEqual(expected);
+      expect({ ...onUpload.mock.calls[0]![4] }).toEqual(expected);
+      // Parsed once and shared by both hooks.
+      expect(onUpload.mock.calls[0]![4]).toBe(hook.mock.calls[0]![3]);
+    });
+
+    it("keeps the last value of a repeated key", async () => {
+      const hook = vi.fn();
+      await withParams(hook, undefined).upload(requestWithQuery("?kind=a&kind=b"));
+      expect({ ...hook.mock.calls[0]![3] }).toEqual({ kind: "b" });
+    });
+
+    it("passes an empty object without a query string", async () => {
+      const hook = vi.fn();
+      const onUpload = vi.fn();
+      await withParams(hook, onUpload).upload(requestWithQuery(""));
+      expect(Object.keys(hook.mock.calls[0]![3])).toEqual([]);
+      expect(Object.keys(onUpload.mock.calls[0]![4])).toEqual([]);
+    });
+
+    it("has no prototype, so keys the browser didn't send read as undefined", async () => {
+      const hook = vi.fn();
+      await withParams(hook, undefined).upload(requestWithQuery("?__proto__=x&constructor=y"));
+      const params = hook.mock.calls[0]![3] as Record<string, string>;
+      expect(Object.getPrototypeOf(params)).toBeNull();
+      expect(params.toString).toBeUndefined();
+      expect(params.constructor).toBe("y");
+      expect(Object.keys(params)).toEqual(["__proto__", "constructor"]);
+    });
+
+    it("doesn't change what the handler uploads", async () => {
+      await withParams(() => {}, undefined).upload(requestWithQuery("?file=other&fileName=b.exe&agentId=x"));
+      expect(client.uploadAgentInput).toHaveBeenCalledWith(AGENT, expect.objectContaining({ fileName: "a.png" }));
+    });
+  });
 });
 
 describe("hook context", () => {

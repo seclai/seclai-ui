@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { createEndpoints, fetchAttachmentReferences, uploadFile, type AgentEndpoints } from "../src";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import {
+  createEndpoints,
+  fetchAttachmentReferences,
+  uploadFile,
+  type AgentEndpoints,
+  type UploadResult,
+} from "../src";
 import { jsonResponse } from "./helpers";
 
 function stubFetch(impl: (url: string, init?: RequestInit) => Promise<Response> | Response) {
@@ -60,6 +66,58 @@ describe("uploadFile", () => {
     const controller = new AbortController();
     await uploadFile(endpoints, new File(["hi"], "a.txt"), { signal: controller.signal });
     expect(fetchMock.mock.calls[0]![1]?.signal).toBe(controller.signal);
+  });
+
+  it("adds params to the upload URL's query string", async () => {
+    const fetchMock = stubFetch(() => jsonResponse(upload));
+    await uploadFile(endpoints, new File(["hi"], "a.txt"), { params: { sessionId: "s 1&2", kind: "headshot" } });
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/seclai/agent/upload?sessionId=s+1%262&kind=headshot");
+  });
+
+  it("accepts URLSearchParams, repeated keys included", async () => {
+    const fetchMock = stubFetch(() => jsonResponse(upload));
+    const params = new URLSearchParams([["tag", "a"], ["tag", "b"]]);
+    await uploadFile(endpoints, new File(["hi"], "a.txt"), { params });
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/seclai/agent/upload?tag=a&tag=b");
+  });
+
+  it("adds params after a query the URL already has, keeping it relative", async () => {
+    const fetchMock = stubFetch(() => jsonResponse(upload));
+    const file = new File(["hi"], "a.txt");
+    const params = { kind: "style" };
+    await uploadFile({ ...endpoints, upload: "/up?tenant=t1" }, file, { params });
+    await uploadFile({ ...endpoints, upload: "/up?" }, file, { params });
+    await uploadFile({ ...endpoints, upload: "up?a=1&" }, file, { params });
+    await uploadFile({ ...endpoints, upload: "/up?a=1#frag" }, file, { params });
+    await uploadFile({ ...endpoints, upload: "https://api.example.com/up?a=1" }, file, { params });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/up?tenant=t1&kind=style",
+      "/up?kind=style",
+      "up?a=1&kind=style",
+      "/up?a=1&kind=style#frag",
+      "https://api.example.com/up?a=1&kind=style",
+    ]);
+  });
+
+  it("leaves the URL unchanged without params, or with empty ones", async () => {
+    const fetchMock = stubFetch(() => jsonResponse(upload));
+    const file = new File(["hi"], "a.txt");
+    const withQuery = { ...endpoints, upload: "/up?a=1" };
+    await uploadFile(withQuery, file);
+    await uploadFile(withQuery, file, { params: {} });
+    await uploadFile(withQuery, file, { params: new URLSearchParams() });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/up?a=1", "/up?a=1", "/up?a=1"]);
+  });
+
+  it("types the result as UploadResult, or as the type the app names", async () => {
+    stubFetch(() => jsonResponse({ id: "rec-1", sessionId: "s1", kind: "headshot" }));
+    type MyUpload = { id: string; sessionId: string; kind: "headshot" | "style" };
+    const file = new File(["hi"], "a.txt");
+
+    expectTypeOf(uploadFile(endpoints, file)).resolves.toEqualTypeOf<UploadResult>();
+    const mine = await uploadFile<MyUpload>(endpoints, file, { params: { sessionId: "s1" } });
+    expectTypeOf(mine).toEqualTypeOf<MyUpload>();
+    expect(mine.kind).toBe("headshot");
   });
 
   it("throws the handler's error message", async () => {
