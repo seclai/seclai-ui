@@ -161,6 +161,20 @@ describe("MarkdownContent", () => {
     expect(root.lastElementChild!.textContent).toBe("After");
   });
 
+  it("closes a fence only on a fence line at least as long, with the same character", () => {
+    const content = "````md\n```\n- not a bullet\n~~~~\n```` \n- bullet";
+    const { root, blocks } = md(content);
+    expect(blocks()).toEqual(["p", "ul"]);
+    expect(root.firstElementChild!.textContent).toBe("````md```- not a bullet~~~~```` ");
+    expect(root.querySelector("li")!.textContent).toBe("bullet");
+  });
+
+  it("takes a one-line ```code``` for text, not a fence that never closes", () => {
+    const { root, blocks } = md("Run ```ls``` first\n```ls```\n\n**Done**");
+    expect(blocks()).toEqual(["p", "p"]);
+    expect(root.querySelector("strong")!.textContent).toBe("Done");
+  });
+
   it("renders HTML in the input as text", () => {
     const content = '<script>alert(1)</script>\n- <img src=x onerror="alert(1)">\n\n**<b>hi</b>**';
     const { root } = md(content);

@@ -22,7 +22,11 @@ type Block =
 const ORDERED = /^\s*(\d{1,9})[.)]\s+(\S.*)$/;
 const BULLET = /^\s*[-*•]\s+(\S.*)$/;
 const BARE_MARKER = /^\s*(\d{1,9}[.)]|[-*•])\s*$/;
-const FENCE = /^\s*(```|~~~)/;
+// As in Markdown, a backtick fence's info string can't hold a backtick, so a
+// one-line "```code```" is a code span rather than a fence that never closes.
+// A fence closes on a line of at least as many of the same character.
+const FENCE = /^\s*(`{3,}(?!.*`)|~{3,})/;
+const CLOSING_FENCE = /^\s*(`{3,}|~{3,})\s*$/;
 
 function parse(content: string): Block[] {
   const blocks: Block[] = [];
@@ -36,7 +40,8 @@ function parse(content: string): Block[] {
     // "- " line in it isn't taken for Markdown. An unclosed fence runs to the end.
     if (fence && last?.type === "p") {
       last.lines.push(line);
-      if (line.trim().startsWith(fence)) fence = null;
+      const closing = CLOSING_FENCE.exec(line)?.[1];
+      if (closing && closing[0] === fence[0] && closing.length >= fence.length) fence = null;
       continue;
     }
     const opening = FENCE.exec(line);
