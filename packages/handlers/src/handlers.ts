@@ -746,7 +746,10 @@ export function createSeclaiHandlers<Ctx>(
         } catch (err) {
           const error = runErrorBody(err);
           // The browser left while the stream was connecting, which aborted it.
-          const browserLeft = !keepReading && !!req.signal?.aborted;
+          // Checked on the upstream, not the request: a browser that left
+          // before the listener was added didn't abort it, so whatever the API
+          // answered is the real outcome.
+          const browserLeft = upstream.signal.aborted;
           // Awaited, so whatever it stores is in place when the browser sees
           // the error. It never throws.
           await reportRefusedRun(

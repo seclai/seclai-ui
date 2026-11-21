@@ -1332,6 +1332,26 @@ describe("run callbacks", () => {
       expect(outcomes).toEqual([{ runId: null, status: "cancelled", output: "", attachments: [], error: null }]);
     });
 
+    it("reports the refusal as failed when the browser left before the stream was sent, so it wasn't aborted", async () => {
+      const browser = new AbortController();
+      refuse();
+      const outcomes: RunOutcome[] = [];
+
+      await createSeclaiHandlers({
+        apiKey: "k",
+        agentId: AGENT,
+        // The browser leaves while the app is still deciding, before the
+        // handler starts listening for it to leave.
+        authorizeRun: () => void browser.abort(),
+        onRunEnd: (o) => void outcomes.push(o),
+      }).run(runRequest({ input: "hi" }, { signal: browser.signal }));
+
+      expect(client.runStreamingAgent.mock.calls[0]![2].signal.aborted).toBe(false);
+      expect(outcomes).toEqual([
+        { runId: null, status: "failed", output: "", attachments: [], error: "Out of credits" },
+      ]);
+    });
+
     it("with keepReadingAfterDisconnect, reports the refusal as failed even if the browser left", async () => {
       const browser = new AbortController();
       leaveWhileConnecting(browser, statusError(402, OUT_OF_CREDITS));
