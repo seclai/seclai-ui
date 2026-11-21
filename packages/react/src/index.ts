@@ -45,7 +45,13 @@ export {
 export { MediaGallery, type MediaGalleryProps } from "./media/MediaGallery";
 export { MediaSkeleton, type MediaSkeletonProps } from "./media/MediaSkeleton";
 export { MediaViewer, type MediaViewerProps } from "./media/MediaViewer";
-export { attachmentFileName } from "./media/files";
+export {
+  attachmentFileName,
+  saveFile,
+  saveFiles,
+  type SaveFilesEntry,
+  type SaveFilesOptions,
+} from "./media/files";
 
 // Placeholders, to be ported from the main Seclai app. See each file.
 export { MarkdownContent, type MarkdownContentProps } from "./placeholders/MarkdownContent";

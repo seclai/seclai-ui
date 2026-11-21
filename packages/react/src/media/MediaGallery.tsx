@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { MediaPreview, type MediaAspectRatio } from "../placeholders/MediaPreview";
 import type { AgentAttachment } from "../types";
-import { attachmentFileName, downloadSequentially, isImage } from "./files";
+import { attachmentFileName, isImage, SAVE_FILES_DELAY_MS, saveFiles } from "./files";
 import { MediaSkeleton } from "./MediaSkeleton";
 import { MediaViewer } from "./MediaViewer";
 
 /** How long "Download all" waits between files, so the browser doesn't block them. */
-export const DOWNLOAD_ALL_DELAY_MS = 400;
+export const DOWNLOAD_ALL_DELAY_MS = SAVE_FILES_DELAY_MS;
 
 export interface MediaGalleryProps {
   /** A run's attachments. Images become numbered cards; other files follow as download links. */
@@ -50,10 +50,9 @@ export function MediaGallery({
     abort.current = controller;
     setDownloading(true);
     try {
-      await downloadSequentially(
+      await saveFiles(
         images.map((image, i) => ({ url: image.url, filename: attachmentFileName(image, i + 1) })),
-        DOWNLOAD_ALL_DELAY_MS,
-        controller.signal,
+        { delayMs: DOWNLOAD_ALL_DELAY_MS, signal: controller.signal },
       );
     } finally {
       if (!controller.signal.aborted) setDownloading(false);

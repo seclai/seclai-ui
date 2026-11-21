@@ -53,15 +53,18 @@ export function isSafeUrl(url: string): boolean {
   }
 }
 
+/** How long `saveFiles` waits between files by default, so the browser doesn't block them. */
+export const SAVE_FILES_DELAY_MS = 400;
+
 /**
- * Saves a URL as a file, through a temporary `<a download>`. A URL that isn't
- * `http:`, `https:`, `blob:` or relative (such as `javascript:`) is skipped.
+ * How long `saveFile` keeps a Blob's object URL before revoking it. The click
+ * only starts the download, and some browsers read the URL a little later, so
+ * revoking it straight away can fail the download. 40 seconds is FileSaver.js's
+ * value: holding the Blob longer only costs memory.
  */
-export function triggerDownload(url: string, filename: string): void {
-  if (!isSafeUrl(url)) {
-    console.warn(`seclai: not downloading ${filename}, its URL isn't http(s), blob or relative.`);
-    return;
-  }
+export const REVOKE_OBJECT_URL_DELAY_MS = 40_000;
+
+function clickDownloadLink(url: string, filename: string): void {
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
@@ -73,18 +76,57 @@ export function triggerDownload(url: string, filename: string): void {
 }
 
 /**
- * Saves several files one after another. Browsers block a burst of simultaneous
- * downloads, so each one waits `delayMs` after the last.
+ * Saves a file in the browser, through a temporary `<a download>`.
+ *
+ * - With a URL, a URL that isn't `http:`, `https:`, `blob:` or relative (such as
+ *   `javascript:`) is skipped with a warning.
+ * - With a `Blob`, such as an image drawn on a canvas, it makes an object URL
+ *   and revokes it 40 seconds later.
+ *
+ * Call it from an event handler. Without a `document`, as in server rendering,
+ * it does nothing.
  */
-export async function downloadSequentially(
-  files: { url: string; filename: string }[],
-  delayMs: number,
-  signal?: AbortSignal,
+export function saveFile(urlOrBlob: string | Blob, filename: string): void {
+  if (typeof document === "undefined") return;
+  if (typeof urlOrBlob !== "string") {
+    const url = URL.createObjectURL(urlOrBlob);
+    clickDownloadLink(url, filename);
+    setTimeout(() => URL.revokeObjectURL(url), REVOKE_OBJECT_URL_DELAY_MS);
+    return;
+  }
+  if (!isSafeUrl(urlOrBlob)) {
+    console.warn(`seclai: not downloading ${filename}, its URL isn't http(s), blob or relative.`);
+    return;
+  }
+  clickDownloadLink(urlOrBlob, filename);
+}
+
+/** A file for `saveFiles`: a URL or a `Blob`, and the name to save it as. */
+export interface SaveFilesEntry {
+  url: string | Blob;
+  filename: string;
+}
+
+export interface SaveFilesOptions {
+  /** How long to wait between files. Defaults to 400 ms. */
+  delayMs?: number;
+  /** Stops before the next file once aborted. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Saves several files one after another with `saveFile`. Browsers block a burst
+ * of simultaneous downloads, so each one waits `delayMs` after the last. The
+ * promise resolves once the last file is started, or when `signal` aborts.
+ */
+export async function saveFiles(
+  files: readonly SaveFilesEntry[],
+  { delayMs = SAVE_FILES_DELAY_MS, signal }: SaveFilesOptions = {},
 ): Promise<void> {
   for (const [i, file] of files.entries()) {
     if (signal?.aborted) return;
     if (i > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (signal?.aborted) return;
-    triggerDownload(file.url, file.filename);
+    saveFile(file.url, file.filename);
   }
 }
