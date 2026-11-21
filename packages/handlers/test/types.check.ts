@@ -73,6 +73,10 @@ createSeclaiHandlers({
   authorizeUpload: (_req, _file, _ctx, params) => {
     const sessionId: string | undefined = params.sessionId;
     void sessionId;
+    // @ts-expect-error A key the browser didn't send is undefined: check it first.
+    const unchecked: string = params.sessionId;
+    void unchecked;
+    if (params.kind) params.kind.toUpperCase();
   },
   upload: {
     onUpload: (_file, _result, _req, _ctx, { kind }) => {

@@ -254,7 +254,7 @@ export type AuthorizeRun<Ctx = undefined> = (
  * (and check that the user may use them) in your hooks. The handler itself
  * doesn't read them.
  */
-export type UploadParams = Record<string, string>;
+export type UploadParams = Record<string, string | undefined>;
 
 /**
  * See {@link SeclaiHandlersOptions.authorizeUpload}. `params` is the upload

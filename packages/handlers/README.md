@@ -116,7 +116,7 @@ const seclai = createSeclaiHandlers({
 ```
 
 - **They come from the browser.** The handler doesn't check them and doesn't use them itself: validate them, and check that the user may use them, in `authorizeUpload`. `onUpload` gets the same values.
-- **Strings only.** `params` is a `Record<string, string>`. When a key is repeated, the last value wins. Without a query string it's an empty object. It has no prototype, so a key the browser didn't send reads as `undefined`.
+- **Strings only.** `params` is a `Record<string, string | undefined>`: a key the browser didn't send reads as `undefined`, and TypeScript makes you check for it. When a key is repeated, the last value wins. Without a query string it's an empty object, with no prototype. `authorizeUpload` and `onUpload` get the same object.
 - **Visible.** They're in the URL, so they show up in server logs. Keep secrets out of them.
 
 ### Access control
