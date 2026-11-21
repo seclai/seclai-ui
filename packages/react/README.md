@@ -250,8 +250,17 @@ These are exported so the API is in place, but they're minimal until they're por
 
 | Export | For now | Coming |
 |---|---|---|
-| `MarkdownContent` | Plain text | GFM tables, KaTeX, mermaid, sanitized SVG |
+| `MarkdownContent` | Paragraphs, lists and bold (see below) | GFM tables, KaTeX, mermaid, sanitized SVG |
 | `MediaPreview` | Image cards (see [Media](#media)), a download link for everything else | Audio, video and PDF previews |
+
+`MarkdownContent` shows the agent's text in `AgentRunForm` and `AgentChat`. It renders:
+
+- paragraphs, split by blank lines, with a single newline as a line break;
+- numbered lists (`1.` or `1)`), keeping the agent's own numbers. Each number is a badge like the one on `MediaPreview`, so "2." in the text matches image 2;
+- bulleted lists (`-`, `*` or `•`);
+- `**bold**`.
+
+Anything else, such as headings, links, code and tables, shows as the text it is. It never renders HTML. While the text streams in, a list item with nothing after its marker, or a `**` that isn't closed yet, shows as plain text until it's complete. The root element is a `div.seclai-markdown`, and the list numbers are `.seclai-markdown-number`.
 
 ## License
 

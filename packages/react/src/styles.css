@@ -370,9 +370,49 @@
   inset: -8px;
 }
 
+/* Agent output: paragraphs, lists and bold. The list numbers are badges, below. */
 .seclai-markdown {
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.seclai-markdown > * {
+  margin: 0;
+}
+
+.seclai-markdown > * + * {
+  margin-block-start: 0.75em;
+}
+
+/* Keeps the text's own spacing, such as indented code. */
+.seclai-markdown p {
+  white-space: pre-wrap;
+}
+
+.seclai-markdown ul {
+  padding-inline-start: 1.25em;
+  list-style: disc;
+}
+
+.seclai-markdown ul > li + li {
+  margin-block-start: 4px;
+}
+
+.seclai-markdown ol {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.seclai-markdown ol > li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.seclai-markdown ol > li > :last-child {
+  min-width: 0;
 }
 
 .seclai-media {
@@ -486,11 +526,12 @@ button.seclai-media-frame:focus-visible {
   }
 }
 
-/* Fixed colours: the badge sits on the image, not on the page. */
-.seclai-media-badge {
-  position: absolute;
-  top: 8px;
-  inset-inline-start: 8px;
+/*
+ * A number badge, on an image and on the matching item of a numbered list in
+ * the agent's text. Fixed colours: the badge sits on the image, not on the page.
+ */
+.seclai-media-badge,
+.seclai-markdown-number {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -504,6 +545,19 @@ button.seclai-media-frame:focus-visible {
   color: #ffffff;
   background: rgb(0 0 0 / 0.72);
   border-radius: 999px;
+}
+
+.seclai-media-badge {
+  position: absolute;
+  top: 8px;
+  inset-inline-start: 8px;
+}
+
+/* On the page, the same badge inverts in a dark colour scheme, so it still stands out. */
+.seclai-markdown-number {
+  flex: none;
+  color: light-dark(#ffffff, #000000);
+  background: light-dark(rgb(0 0 0 / 0.72), rgb(255 255 255 / 0.85));
 }
 
 .seclai-media-error {
