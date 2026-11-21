@@ -242,6 +242,30 @@ describe("AgentChat", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
   }
 
+  it("shows the run's progress until the reply starts streaming", async () => {
+    let held: ReturnType<typeof controlledResponse> | undefined;
+    stubApi({
+      run: (_body, init) => {
+        held = controlledResponse(init.signal);
+        return held.response;
+      },
+    });
+    const user = userEvent.setup();
+    render(<AgentChat />);
+
+    await say(user, "hi");
+    expect(await screen.findByText("Starting the run…")).toBeTruthy();
+    held!.push(sse("step_progress", { step_id: "s1", step_name: "Search", message: "3 results" }));
+    expect(await screen.findByText("Search")).toBeTruthy();
+    expect(screen.getByRole("timer")).toBeTruthy();
+
+    held!.push(sse("stream_token", { token: "Hello" }));
+    expect(await screen.findByText("Hello")).toBeTruthy();
+    expect(screen.queryByText("Search")).toBeNull();
+    expect(screen.queryByRole("timer")).toBeNull();
+    held!.close();
+  });
+
   it("reuses one session id across turns and keeps the history", async () => {
     let turn = 0;
     const { runBodies } = stubApi({ run: () => completed(`Reply ${++turn}`) });

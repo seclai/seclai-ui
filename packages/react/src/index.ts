@@ -10,6 +10,12 @@ export {
 export { AgentRunForm, type AgentRunFormProps } from "./AgentRunForm";
 export { SeclaiAgent, type SeclaiAgentProps } from "./SeclaiAgent";
 export {
+  RunProgress,
+  useElapsed,
+  type RunProgressProps,
+  type RunProgressRun,
+} from "./RunProgress";
+export {
   useAgentRun,
   type AgentRunEvent,
   type AgentRunState,

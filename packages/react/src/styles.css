@@ -209,6 +209,59 @@
   color: var(--seclai-muted);
 }
 
+.seclai-run-progress {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--seclai-gap) / 2);
+}
+
+.seclai-run-progress .seclai-steps li {
+  display: flex;
+  gap: 8px;
+}
+
+.seclai-step-marker {
+  flex-shrink: 0;
+  color: var(--seclai-muted);
+}
+
+.seclai-steps li:last-child .seclai-step-marker {
+  color: var(--seclai-accent);
+}
+
+.seclai-step-name {
+  font-weight: 500;
+}
+
+.seclai-run-progress-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 0.875em;
+  color: var(--seclai-muted);
+  background: var(--seclai-surface);
+  border-radius: var(--seclai-radius);
+}
+
+.seclai-run-progress-pulse {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  background: var(--seclai-accent);
+  border-radius: 50%;
+  animation: seclai-pulse 1.6s ease-in-out infinite;
+}
+
+.seclai-run-progress-message {
+  flex: 1;
+}
+
+.seclai-run-progress-clock {
+  margin-inline-start: auto;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Output */
 .seclai-output,
 .seclai-turn {
@@ -252,8 +305,12 @@
   border-radius: var(--seclai-radius);
 }
 
-/* Hidden from view but not from the browser, so a wrapping label opens the picker. */
-.seclai-agent .seclai-sr-only {
+/*
+ * Hidden from view but not from the browser or screen readers: a wrapping label
+ * still opens the picker, and step states are still read out.
+ */
+.seclai-agent .seclai-sr-only,
+.seclai-run-progress .seclai-sr-only {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -725,7 +782,8 @@ button.seclai-media-frame:focus-visible {
     transform: none;
   }
 
-  .seclai-skeleton > span {
+  .seclai-skeleton > span,
+  .seclai-run-progress-pulse {
     animation: none;
   }
 }
