@@ -474,6 +474,20 @@ describe("saveFiles", () => {
     expect(saved).toEqual(["a.png", "b.png"]);
   });
 
+  it("resolves as soon as the signal aborts, without waiting out the delay", async () => {
+    vi.useFakeTimers();
+    const saved = recordClicks();
+    const controller = new AbortController();
+    let finished = false;
+    void saveFiles(files, { delayMs: 60_000, signal: controller.signal }).then(() => (finished = true));
+    await vi.advanceTimersByTimeAsync(10);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finished).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(saved).toEqual(["a.png"]);
+  });
+
   it("saves nothing when the signal has already aborted", async () => {
     const saved = recordClicks();
     await saveFiles(files, { signal: AbortSignal.abort() });

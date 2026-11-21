@@ -125,8 +125,21 @@ export async function saveFiles(
 ): Promise<void> {
   for (const [i, file] of files.entries()) {
     if (signal?.aborted) return;
-    if (i > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (i > 0) await wait(delayMs, signal);
     if (signal?.aborted) return;
     saveFile(file.url, file.filename);
   }
+}
+
+/** Waits `ms`, or less if `signal` aborts first, clearing the timer. */
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
