@@ -133,6 +133,132 @@ describe("attachmentReferences", () => {
   });
 });
 
+describe("getAttachmentReferences", () => {
+  const REFS = {
+    requires_uploads: true,
+    accepted_attachments: [{ name: "photo", min: 1, content_types: ["image/*"] }],
+  };
+  const refsRequest = () => new Request(`${URL_BASE}/attachment-references`);
+  const withCheck = () =>
+    createSeclaiHandlers({ apiKey: "secret-key", agentId: AGENT, upload: { checkContentType: true } });
+  const pngUpload = () => {
+    const form = new FormData();
+    form.set("file", new File(["png"], "a.png", { type: "image/png" }));
+    return new Request(`${URL_BASE}/upload`, { method: "POST", body: form });
+  };
+
+  beforeEach(() => {
+    client.getAgentAttachmentReferences.mockResolvedValue(REFS);
+    client.uploadAgentInput.mockResolvedValue({
+      id: "up-1",
+      status: "ready",
+      filename: "a.png",
+      content_type: "image/png",
+      file_size: 3,
+    });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("returns the parsed references", async () => {
+    expect(await handlers().getAttachmentReferences()).toEqual(REFS);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledWith(AGENT);
+  });
+
+  it("looks them up once within the TTL, and again after it", async () => {
+    vi.useFakeTimers();
+    const seclai = handlers();
+    await seclai.getAttachmentReferences();
+    await seclai.getAttachmentReferences();
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(ATTACHMENT_SLOTS_TTL_MS);
+    await seclai.getAttachmentReferences();
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares one lookup between concurrent calls", async () => {
+    const seclai = handlers();
+    const [a, b] = await Promise.all([seclai.getAttachmentReferences(), seclai.getAttachmentReferences()]);
+    expect(a).toEqual(REFS);
+    expect(b).toEqual(REFS);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledOnce();
+  });
+
+  it("gives each call its own copy", async () => {
+    const seclai = withCheck();
+    const refs = await seclai.getAttachmentReferences();
+    refs.accepted_attachments![0]!.content_types = ["application/pdf"];
+    expect(await seclai.getAttachmentReferences()).toEqual(REFS);
+    expect((await seclai.upload(pngUpload())).status).toBe(200);
+  });
+
+  it("rejects when the lookup fails, and tries again on the next call", async () => {
+    const failure = statusError(503);
+    client.getAgentAttachmentReferences.mockRejectedValueOnce(failure);
+    const seclai = handlers();
+
+    await expect(seclai.getAttachmentReferences()).rejects.toBe(failure);
+    expect(await seclai.getAttachmentReferences()).toEqual(REFS);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares the lookup with a later upload's content-type check", async () => {
+    const seclai = withCheck();
+    await seclai.getAttachmentReferences();
+    expect((await seclai.upload(pngUpload())).status).toBe(200);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledOnce();
+  });
+
+  it("reuses the lookup an upload's content-type check made", async () => {
+    const seclai = withCheck();
+    expect((await seclai.upload(pngUpload())).status).toBe(200);
+    expect(await seclai.getAttachmentReferences()).toEqual(REFS);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledOnce();
+  });
+
+  it("doesn't let a failed lookup refuse a later upload", async () => {
+    client.getAgentAttachmentReferences.mockRejectedValueOnce(new Error("down"));
+    const seclai = withCheck();
+    await expect(seclai.getAttachmentReferences()).rejects.toThrow("down");
+    expect((await seclai.upload(pngUpload())).status).toBe(200);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+  });
+
+  it("is available after withContext, sharing the same lookup", async () => {
+    const seclai = createSeclaiHandlers<{ userId: string }>({ apiKey: "secret-key", agentId: AGENT });
+    expect(await seclai.getAttachmentReferences()).toEqual(REFS);
+    expect(await seclai.withContext({ userId: "u1" }).getAttachmentReferences()).toEqual(REFS);
+    expect(await seclai.withContext({ userId: "u2" }).getAttachmentReferences()).toEqual(REFS);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledOnce();
+  });
+
+  it("is refreshed by the attachmentReferences handler, which always looks up afresh", async () => {
+    const seclai = handlers();
+    await seclai.getAttachmentReferences();
+    const fresh = { requires_uploads: false, accepted_attachments: [] };
+    client.getAgentAttachmentReferences.mockResolvedValue(fresh);
+
+    expect(await (await seclai.attachmentReferences(refsRequest())).json()).toEqual(fresh);
+    expect(await seclai.getAttachmentReferences()).toEqual(fresh);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps its lookup when the attachmentReferences handler's fails", async () => {
+    const seclai = handlers();
+    await seclai.getAttachmentReferences();
+    client.getAgentAttachmentReferences.mockRejectedValueOnce(statusError(503));
+
+    expect((await seclai.handle(refsRequest())).status).toBe(502);
+    expect(await seclai.getAttachmentReferences()).toEqual(REFS);
+    expect(client.getAgentAttachmentReferences).toHaveBeenCalledTimes(2);
+  });
+
+  it("isn't a route", async () => {
+    const res = await handlers().handle(new Request(`${URL_BASE}/getAttachmentReferences`));
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("error mapping", () => {
   const refs = () => handlers().attachmentReferences(new Request(`${URL_BASE}/refs`));
 

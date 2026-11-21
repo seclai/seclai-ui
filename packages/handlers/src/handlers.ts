@@ -2,6 +2,7 @@ import {
   Seclai,
   SeclaiApiVersion,
   type AcceptedAttachmentSlot,
+  type AgentAttachmentRefsApiResponse,
   type ApiVersion,
 } from "@seclai/sdk";
 import { errorLogFields, json, jsonError, toErrorResponse } from "./errors";
@@ -35,9 +36,10 @@ const ATTACHMENT_ID = /^[A-Za-z0-9_-]+={0,2}$/;
 const MAX_DOWNLOAD_NAME_LENGTH = 255;
 
 /**
- * How long `upload.checkContentType` reuses the agent's attachment slots. Short,
- * so a slot edited on Seclai takes effect within a minute, but long enough that a
- * burst of uploads makes one lookup.
+ * How long the agent's attachment references are reused by
+ * `getAttachmentReferences` and `upload.checkContentType`, which share them.
+ * Short, so a slot edited on Seclai takes effect within a minute, but long enough
+ * that a page load and a burst of uploads make one lookup.
  */
 export const ATTACHMENT_SLOTS_TTL_MS = 60 * 1000;
 
@@ -108,7 +110,8 @@ export interface SeclaiUploadOptions<Ctx = undefined> {
    * agent's accepted attachment slots allows. A file of unknown type (none, or
    * `application/octet-stream`, which a typeless file arrives as) isn't checked:
    * the API decides. The slots are read with
-   * `getAgentAttachmentReferences` and reused for {@link ATTACHMENT_SLOTS_TTL_MS}.
+   * `getAgentAttachmentReferences` and reused for {@link ATTACHMENT_SLOTS_TTL_MS},
+   * sharing the lookup with {@link SeclaiLookups.getAttachmentReferences}.
    * An agent with no slots accepts nothing, and a failed lookup refuses the
    * upload.
    *
@@ -261,8 +264,11 @@ export interface RunRequestBody {
 
 export type SeclaiHandler = (req: Request) => Promise<Response>;
 
+/** Which files the agent accepts: the `attachmentReferences` handler's JSON body. */
+export type AttachmentReferences = AgentAttachmentRefsApiResponse;
+
 export interface SeclaiHandlers {
-  /** `GET`: which files the agent accepts. */
+  /** `GET`: which files the agent accepts. Always a fresh lookup. */
   attachmentReferences: SeclaiHandler;
   /** `POST` multipart form data with a `file` field: returns the upload's `id`. */
   upload: SeclaiHandler;
@@ -278,8 +284,25 @@ export interface SeclaiHandlers {
   handle: SeclaiHandler;
 }
 
+/**
+ * Server-side lookups offered next to the handlers. They need no request or
+ * context, so they're available both before and after `withContext`.
+ */
+export interface SeclaiLookups {
+  /**
+   * Which files the agent accepts, for server-side code such as a loader that
+   * sets a composer's file limit. The same value as the `attachmentReferences`
+   * handler's body, reused for {@link ATTACHMENT_SLOTS_TTL_MS} and shared with
+   * `upload.checkContentType`. Each call gets its own copy.
+   *
+   * Rejects if the lookup fails, with the SDK's error. A failure isn't reused:
+   * the next call tries again.
+   */
+  getAttachmentReferences(): Promise<AttachmentReferences>;
+}
+
 /** What {@link createSeclaiHandlers} adds to the handlers. */
-export interface WithContext<Ctx> {
+export interface WithContext<Ctx> extends SeclaiLookups {
   /**
    * The same handlers, with `ctx` passed to the hooks instead of calling the
    * `context` option. Use it when your framework already knows the user:
@@ -289,7 +312,7 @@ export interface WithContext<Ctx> {
    *   seclai.withContext({ userId: context.get(user).id }).handle(request);
    * ```
    */
-  withContext(ctx: Ctx): SeclaiHandlers;
+  withContext(ctx: Ctx): SeclaiHandlers & SeclaiLookups;
 }
 
 /** The last path segment each handler answers to in {@link SeclaiHandlers.handle}. */
@@ -448,24 +471,29 @@ export function createSeclaiHandlers<Ctx>(
     fetch: (input, init) => globalThis.fetch(input, init),
   });
 
-  // One lookup in flight at a time, shared by concurrent uploads. A failure isn't
-  // kept, so the next upload tries again.
-  let slots: { promise: Promise<AcceptedAttachmentSlot[]>; expires: number } | undefined;
-  function attachmentSlots(): Promise<AcceptedAttachmentSlot[]> {
-    if (!slots || Date.now() >= slots.expires) {
-      const entry = {
-        promise: client
-          .getAgentAttachmentReferences(agentId)
-          .then((refs) => refs.accepted_attachments ?? []),
-        expires: Date.now() + ATTACHMENT_SLOTS_TTL_MS,
-      };
-      entry.promise.catch(() => {
-        if (slots === entry) slots = undefined;
-      });
-      slots = entry;
-    }
-    return slots.promise;
+  // The agent's attachment references, shared by `getAttachmentReferences` and
+  // `upload.checkContentType`. One lookup in flight at a time, shared by
+  // concurrent callers. A failure isn't kept, so the next call tries again.
+  type CachedRefs = { promise: Promise<AttachmentReferences>; expires: number };
+  let refsCache: CachedRefs | undefined;
+  function remember(promise: Promise<AttachmentReferences>): void {
+    const entry: CachedRefs = { promise, expires: Date.now() + ATTACHMENT_SLOTS_TTL_MS };
+    entry.promise.catch(() => {
+      if (refsCache === entry) refsCache = undefined;
+    });
+    refsCache = entry;
   }
+  function cachedReferences(): Promise<AttachmentReferences> {
+    if (!refsCache || Date.now() >= refsCache.expires) {
+      remember(client.getAgentAttachmentReferences(agentId));
+    }
+    return refsCache!.promise;
+  }
+  const attachmentSlots = async (): Promise<AcceptedAttachmentSlot[]> =>
+    (await cachedReferences()).accepted_attachments ?? [];
+  // A copy, so an app that edits the result doesn't change what uploads are checked against.
+  const getAttachmentReferences = async (): Promise<AttachmentReferences> =>
+    structuredClone(await cachedReferences());
 
   const tooLarge = () =>
     jsonError(413, `The file is larger than the ${maxBytes}-byte limit.`);
@@ -497,7 +525,7 @@ export function createSeclaiHandlers<Ctx>(
     }
   }
 
-  const build = (resolveCtx: (req: Request) => Promise<Ctx>): SeclaiHandlers => {
+  const build = (resolveCtx: (req: Request) => Promise<Ctx>): SeclaiHandlers & SeclaiLookups => {
     // Resolved at most once per request, and shared by the hooks and the
     // callbacks, so the `context` option isn't called twice.
     const resolved = new WeakMap<Request, Promise<Ctx>>();
@@ -514,7 +542,11 @@ export function createSeclaiHandlers<Ctx>(
       async attachmentReferences(req) {
         if (req.method !== "GET") return wrongMethod("GET");
         try {
-          return json(await client.getAgentAttachmentReferences(agentId));
+          // Always fresh, as the browser expects, but a success also refreshes the
+          // shared cache, so the uploads that follow a page load reuse it.
+          const refs = await client.getAgentAttachmentReferences(agentId);
+          remember(Promise.resolve(refs));
+          return json(refs);
         } catch (err) {
           return toErrorResponse(err);
         }
@@ -824,6 +856,7 @@ export function createSeclaiHandlers<Ctx>(
 
     return {
       ...handlers,
+      getAttachmentReferences,
       async handle(req) {
         const segment = new URL(req.url).pathname.replace(/\/+$/, "").split("/").pop() ?? "";
         const name = Object.hasOwn(ROUTES, segment) ? ROUTES[segment as keyof typeof ROUTES] : undefined;
