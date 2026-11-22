@@ -44,6 +44,19 @@ export const ALL: APIRoute = ({ request }) => seclai.handle(request);
 
 `run` needs `input`, `uploadIds`, or both. `sessionId` reaches the agent as `metadata.session_id`, which is what chat agents key a conversation on.
 
+### Attachment references on the server
+
+A server-rendered page can read the agent's accepted files directly, for example to set a composer's file limit and `accept` types in a loader:
+
+```ts
+const refs = await seclai.getAttachmentReferences();
+// { requires_uploads, accepted_attachments: [{ name, min, max, content_types, ... }] }
+```
+
+It returns the same value as the `attachmentReferences` handler's JSON body, and needs no request or context, so it's also on what `withContext(ctx)` returns. The result is reused for 60 seconds (`ATTACHMENT_SLOTS_TTL_MS`) and shared with [`checkContentType`](#upload-options), so a page load and the uploads after it make one lookup, and concurrent calls share one that's in flight. Each call gets its own copy. If the lookup fails, it rejects with the SDK's error, so you choose the fallback. A failure isn't reused: the next call tries again.
+
+The `attachmentReferences` handler always looks up afresh, and a successful lookup refreshes the shared copy.
+
 ### Options
 
 | Option | Default | |
@@ -87,7 +100,7 @@ const seclai = createSeclaiHandlers({
 The size checks and the content-type check refuse a file before it reaches the API, and `onUpload` runs only after the API has accepted one. In order, `upload` checks the size, then calls [`authorizeUpload`](#access-control), then checks the content type, so a refused caller never triggers the slot lookup.
 
 - **`maxBytes`** is checked against `content-length` first, so a request that declares an oversized body is refused before it's read. Without `content-length`, as with a chunked body, the bytes are counted as they stream and reading stops with a 413 once they pass the limit. Both checks allow 64 KB for the multipart envelope, and the file's own size is checked once the form is read.
-- **`checkContentType`** reads the slots with `getAgentAttachmentReferences` and reuses them for 60 seconds, so an edit to the agent's slots takes up to a minute to apply. A slot type is exact, like `application/pdf`, or a wildcard, like `image/*`. A slot with no types accepts every file. A file of unknown type isn't checked and goes on to the API, which decides: browsers send no type for `.md`, some `.csv` files or HEIC on Windows, and such a file arrives as `application/octet-stream`. An agent with no slots takes no typed files, so they all get a 415. If the lookup fails, the upload is refused with the error from the API, usually a 502, and the next upload tries again. Slots' `name_pattern` isn't checked here: the API checks it when the run starts. The slots are kept per `createSeclaiHandlers` instance, so where the handlers are created per request, as on Cloudflare Workers, every upload makes its own lookup.
+- **`checkContentType`** reads the slots with `getAgentAttachmentReferences` and reuses them for 60 seconds, sharing them with [`getAttachmentReferences`](#attachment-references-on-the-server), so an edit to the agent's slots takes up to a minute to apply. A slot type is exact, like `application/pdf`, or a wildcard, like `image/*`. A slot with no types accepts every file. A file of unknown type isn't checked and goes on to the API, which decides: browsers send no type for `.md`, some `.csv` files or HEIC on Windows, and such a file arrives as `application/octet-stream`. An agent with no slots takes no typed files, so they all get a 415. If the lookup fails, the upload is refused with the error from the API, usually a 502, and the next upload tries again. Slots' `name_pattern` isn't checked here: the API checks it when the run starts. The slots are kept per `createSeclaiHandlers` instance, so where the handlers are created per request, as on Cloudflare Workers, every upload makes its own lookup.
 - **`onUpload`** receives the `File`, the `{ id, status, filename, content_type, file_size }` the handler would return, the `Request`, whose body has already been read, and the app's [context](#access-control), the same value the access-control hooks get. The context is resolved before the file is uploaded, so a `context` that refuses does so before the file reaches Seclai. Returning nothing keeps the default response. If it throws, the browser gets a 500 with a generic message. The file is already on Seclai by then.
 
 ### Access control

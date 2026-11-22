@@ -1,5 +1,5 @@
 // Type-level tests: checked by `tsc` (the package typecheck includes test/), not run by vitest.
-import { createSeclaiHandlers, deny } from "../src";
+import { createSeclaiHandlers, deny, type AttachmentReferences, type SeclaiHandlers } from "../src";
 
 // No context: hooks get `undefined`, and the plain handlers keep `(req) => Response`.
 const plain = createSeclaiHandlers({ apiKey: "k", agentId: "a", authorizeRun: (_req, body) => body });
@@ -27,6 +27,11 @@ const explicit = createSeclaiHandlers<{ orgId: number }>({
   authorizeUpload: (_req, file, { orgId }) => file.size < 1000 && orgId > 0,
 });
 explicit.withContext({ orgId: 1 });
+// Needs no context, so it's offered before withContext too.
+const refs: Promise<AttachmentReferences> = explicit.getAttachmentReferences();
+explicit.withContext({ orgId: 1 }).getAttachmentReferences();
+plain.getAttachmentReferences();
+void refs;
 // @ts-expect-error A typed context without a `context` option is only reachable through withContext.
 explicit.handle;
 
@@ -72,3 +77,11 @@ createSeclaiHandlers({
   // @ts-expect-error Without a context, the callbacks' context is undefined.
   onRunEnd: (_outcome, { context }) => void context.userId,
 });
+
+// `SeclaiHandlers` holds only the request handlers, so its keys stay route names.
+type Route = Exclude<keyof SeclaiHandlers, "handle">;
+const routes: Route[] = ["attachmentReferences", "upload", "run", "download"];
+// @ts-expect-error getAttachmentReferences isn't a handler.
+const notRoute: Route = "getAttachmentReferences";
+void routes;
+void notRoute;
