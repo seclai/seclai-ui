@@ -2,9 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import type { AgentAttachment } from "../types";
 import { attachmentFileName, mediaKind, type MediaKind } from "./files";
 
-// Ported from the MediaPreview component in the main Seclai app, without its
-// Mantine and Tabler dependencies. Images, audio, video and PDFs get a card;
-// anything else is a download link.
+// Images, audio, video and PDFs get a card; anything else is a download link.
 //
 // Every preview loads only `attachment.url`, which the package builds as the
 // download handler's own URL. There's no <embed> or <iframe>: a PDF goes in an
