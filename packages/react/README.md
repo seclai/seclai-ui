@@ -374,6 +374,16 @@ Or pass them to one `MarkdownContent` with its `extensions` prop, which replaces
 | `math()` from `@seclai/react/math` | `katex` and `remark-math` | `$…$` and `\(…\)` inline, `$$…$$` and `\[…\]` as a block, and ```` ```math ```` fences, with [KaTeX](https://katex.org). Import KaTeX's stylesheet, `katex/dist/katex.min.css`, once in your app: without it the maths shows twice, as text and as MathML |
 | `mermaid()` from `@seclai/react/mermaid` | `mermaid` | ```` ```mermaid ```` code blocks as [Mermaid](https://mermaid.js.org) diagrams. Mermaid is loaded on demand the first time a diagram shows, so bundlers split it into chunks of its own |
 
+**Before turning on `html()`:** with it, angle brackets in prose are read as HTML tags, and a tag that isn't on the allowlist is removed. Agents write such text all the time outside backticks, and the reader sees words go missing with no sign of why:
+
+| The agent writes | Shows with `html()` |
+|---|---|
+| `Return a List<String> of names` | Return a List of names |
+| `Pass the <filename> argument` | Pass the  argument |
+| `If a<b and c>d then swap.` | If a**d then swap.** (read as a `<b>` tag) |
+
+Text in backticks, such as `` `List<String>` ``, is safe. So turn `html()` on only for agents that are meant to produce HTML or SVG, and prompt them to put code, types and placeholders in backticks. A tag left open also makes the rest of the reply re-parse whole on every streamed token, which slows long replies down.
+
 `katex`, `remark-math` and `mermaid` are optional peer dependencies: install them only for the extensions you use.
 
 ```sh
