@@ -616,7 +616,8 @@ export function createSeclaiHandlers<Ctx>(
           return jsonError(400, "The request body must be multipart form data.");
         }
         const file = form.get("file");
-        // Not `instanceof File`: Node 18 has no global File.
+        // Not `instanceof File`: a runtime's FormData may hand back a File from
+        // another implementation, which `instanceof` wouldn't recognise.
         if (file === null || typeof file === "string") {
           return jsonError(400, "The form must include a `file` field holding a file.");
         }

@@ -10,6 +10,14 @@ npm install @seclai/react
 
 `react` and `react-dom` 18 or later are peer dependencies. Mount the handlers on your server first: see the [`@seclai/handlers` README](https://www.npmjs.com/package/@seclai/handlers#usage).
 
+### Module format
+
+`@seclai/react` ships as ES modules only. Bundlers and `import` work as usual. CommonJS code, such as a server-rendering setup, can `require` it on Node 22.12 or later; Node 22.12 and Node 23.0 to 23.4 print an `ExperimentalWarning` the first time, and Node 22.13+ and 23.5+ don't.
+
+In a TypeScript CommonJS project, set `module` to `nodenext` (TypeScript 5.8+) or `node20` (TypeScript 5.9+), so the compiler allows that `require`. With `node16` or `node18` it reports error TS1479 on the import. `commonjs` with `moduleResolution` `node10` and the `bundler` setting work as they are.
+
+Jest's default CommonJS mode doesn't transform packages in `node_modules`, so tell it to transform this one, for example with `transformIgnorePatterns: ["/node_modules/(?!(\\.pnpm/)?@seclai[/+])"]` (the `.pnpm` part covers pnpm's layout), using a transform that converts ES modules to CommonJS, such as `babel-jest` with `@babel/preset-env`. Vitest needs no setup.
+
 ## Usage
 
 ```tsx
