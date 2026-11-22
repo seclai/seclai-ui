@@ -13,13 +13,35 @@ const EXTENSIONS: Record<string, string> = {
   "application/octet-stream": "bin",
 };
 
+/** A mime type without parameters, in lower case: `Audio/MPEG; codecs=mp3` gives `audio/mpeg`. */
+export function baseMime(mime: string): string {
+  return mime.split(";")[0]!.trim().toLowerCase();
+}
+
 export function isImage(attachment: Pick<AgentAttachment, "mime">): boolean {
-  return attachment.mime.toLowerCase().startsWith("image/");
+  return baseMime(attachment.mime).startsWith("image/");
+}
+
+/** The files that get a preview card. */
+export type MediaKind = "image" | "audio" | "video" | "pdf";
+
+/**
+ * How an attachment is previewed: by its mime type, ignoring case and
+ * parameters. `null` for anything else, which gets a download link. SVG is an
+ * image, shown in an `<img>`, where it can't run script.
+ */
+export function mediaKind(attachment: Pick<AgentAttachment, "mime">): MediaKind | null {
+  const type = baseMime(attachment.mime);
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("audio/")) return "audio";
+  if (type.startsWith("video/")) return "video";
+  if (type === "application/pdf") return "pdf";
+  return null;
 }
 
 /** A file extension for a mime type: `image/png` gives `png`, `image/jpeg` gives `jpg`. */
 export function extensionForMime(mime: string): string {
-  const type = mime.split(";")[0]!.trim().toLowerCase();
+  const type = baseMime(mime);
   const known = EXTENSIONS[type];
   if (known) return known;
   // `image/webp` → webp, `application/vnd.foo+json` → json, `audio/x-wav` → wav.
@@ -29,12 +51,13 @@ export function extensionForMime(mime: string): string {
 }
 
 /**
- * The filename to save an attachment as: its own name, or else `image-<number>`
- * (or its id) with an extension from its mime type.
+ * The filename to save an attachment as: its own name, or else its kind and
+ * number (`image-2`, `audio-3`, `video-1`, `pdf-4`, or `file-5` for anything
+ * else), or its id without a number, with an extension from its mime type.
  */
 export function attachmentFileName(attachment: AgentAttachment, number?: number): string {
   if (attachment.name) return attachment.name;
-  const base = number != null ? `image-${number}` : attachment.id;
+  const base = number != null ? `${mediaKind(attachment) ?? "file"}-${number}` : attachment.id;
   return `${base}.${extensionForMime(attachment.mime)}`;
 }
 

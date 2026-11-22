@@ -1,11 +1,17 @@
 import { useEffect, useId, useRef, type KeyboardEvent, type MouseEvent, type SyntheticEvent } from "react";
-import { imageLabel } from "../placeholders/MediaPreview";
+import { mediaLabel } from "./MediaPreview";
 import type { AgentAttachment } from "../types";
 import { attachmentFileName } from "./files";
 
 export interface MediaViewerProps {
-  /** The images to page through, in order. Image `i` is numbered `i + 1`. */
+  /** The images to page through, in order. Image `i` is numbered `i + 1`, unless `numbers` says otherwise. */
   attachments: AgentAttachment[];
+  /**
+   * Each image's number, as on its card, for its name and filename. A gallery
+   * with audio, video or PDF cards between its images passes these, so image 3
+   * isn't called "Image 2" because it's the second image.
+   */
+  numbers?: readonly number[];
   /** The image showing, or `null` when the viewer is closed. */
   index: number | null;
   /** Called with the new index when the user goes to the previous or next image. */
@@ -20,7 +26,7 @@ export interface MediaViewerProps {
  * show, and `null` to close it. Focus moves into the viewer when it opens and
  * back to where it was when it closes.
  */
-export function MediaViewer({ attachments, index, onIndexChange, onClose }: MediaViewerProps) {
+export function MediaViewer({ attachments, numbers, index, onIndexChange, onClose }: MediaViewerProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -99,8 +105,9 @@ export function MediaViewer({ attachments, index, onIndexChange, onClose }: Medi
     if (event.target === event.currentTarget) onClose();
   }
 
-  const number = index != null ? index + 1 : 0;
-  const label = current ? imageLabel(current, number) : "";
+  const position = index != null ? index + 1 : 0;
+  const number = index != null ? (numbers?.[index] ?? position) : 0;
+  const label = current ? mediaLabel(current, number) : "";
 
   return (
     <dialog
@@ -120,7 +127,7 @@ export function MediaViewer({ attachments, index, onIndexChange, onClose }: Medi
               {label}
               {attachments.length > 1 && (
                 <span className="seclai-viewer-count">
-                  {number} of {attachments.length}
+                  {position} of {attachments.length}
                 </span>
               )}
             </p>

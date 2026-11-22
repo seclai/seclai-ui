@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { MediaPreview, type MediaAspectRatio } from "../placeholders/MediaPreview";
 import type { AgentAttachment } from "../types";
-import { attachmentFileName, isImage, SAVE_FILES_DELAY_MS, saveFiles } from "./files";
+import { attachmentFileName, isImage, mediaKind, SAVE_FILES_DELAY_MS, saveFiles } from "./files";
+import { MediaPreview, type MediaAspectRatio } from "./MediaPreview";
 import { MediaSkeleton } from "./MediaSkeleton";
 import { MediaViewer } from "./MediaViewer";
 
@@ -9,13 +9,19 @@ import { MediaViewer } from "./MediaViewer";
 export const DOWNLOAD_ALL_DELAY_MS = SAVE_FILES_DELAY_MS;
 
 export interface MediaGalleryProps {
-  /** A run's attachments. Images become numbered cards; other files follow as download links. */
+  /**
+   * A run's attachments. Images, audio, video and PDFs become cards, numbered in
+   * this order; other files follow as download links.
+   */
   attachments: AgentAttachment[];
-  /** Every card's aspect ratio. Without it each card takes its image's own ratio. */
+  /**
+   * Every image and video card's aspect ratio. Without it each takes its file's
+   * own ratio. Audio and PDF cards keep their own shape.
+   */
   aspectRatio?: MediaAspectRatio;
   /**
-   * Skeleton cards to show after the images, for images still being generated.
-   * They're numbered on from the last image.
+   * Skeleton cards to show after the cards, for images still being generated.
+   * They're numbered on from the last card.
    */
   pending?: number;
   /** App-specific buttons for each card. Gets the attachment and its 1-based number. */
@@ -23,9 +29,10 @@ export interface MediaGalleryProps {
 }
 
 /**
- * Lays out a run's images as numbered cards that open a full-size viewer, with
- * "Download all" when there's more than one. Files that aren't images are shown
- * after them with `MediaPreview`.
+ * Lays out a run's images, audio, video and PDFs as numbered cards, in the
+ * attachments' order, so the numbers match the agent's numbered list. Images
+ * open a full-size viewer. "Download all" saves every card's file when there's
+ * more than one. Other files follow the cards as download links.
  */
 export function MediaGallery({
   attachments,
@@ -33,8 +40,16 @@ export function MediaGallery({
   pending = 0,
   actions,
 }: MediaGalleryProps) {
-  const images = attachments.filter(isImage);
-  const files = attachments.filter((attachment) => !isImage(attachment));
+  const cards = attachments.filter((attachment) => mediaKind(attachment) != null);
+  const files = attachments.filter((attachment) => mediaKind(attachment) == null);
+  // The viewer pages through the images only, keeping their card numbers.
+  const images: AgentAttachment[] = [];
+  const imageNumbers: number[] = [];
+  const viewerIndexes = cards.map((card, i) => {
+    if (!isImage(card)) return null;
+    imageNumbers.push(i + 1);
+    return images.push(card) - 1;
+  });
   const [viewing, setViewing] = useState<number | null>(null);
   const [downloading, setDownloading] = useState(false);
   const abort = useRef<AbortController | null>(null);
@@ -51,7 +66,7 @@ export function MediaGallery({
     setDownloading(true);
     try {
       await saveFiles(
-        images.map((image, i) => ({ source: image.url, filename: attachmentFileName(image, i + 1) })),
+        cards.map((card, i) => ({ source: card.url, filename: attachmentFileName(card, i + 1) })),
         { delayMs: DOWNLOAD_ALL_DELAY_MS, signal: controller.signal },
       );
     } finally {
@@ -63,28 +78,31 @@ export function MediaGallery({
 
   return (
     <div className="seclai-gallery">
-      {images.length + skeletons > 0 && (
+      {cards.length + skeletons > 0 && (
         <ul className="seclai-gallery-grid">
-          {images.map((image, i) => (
-            <li key={image.id}>
-              <MediaPreview
-                attachment={image}
-                aspectRatio={aspectRatio}
-                number={i + 1}
-                actions={actions?.(image, i + 1)}
-                onOpen={() => setViewing(i)}
-              />
-            </li>
-          ))}
+          {cards.map((card, i) => {
+            const image = viewerIndexes[i];
+            return (
+              <li key={card.id}>
+                <MediaPreview
+                  attachment={card}
+                  aspectRatio={aspectRatio}
+                  number={i + 1}
+                  actions={actions?.(card, i + 1)}
+                  onOpen={image != null ? () => setViewing(image) : undefined}
+                />
+              </li>
+            );
+          })}
           {Array.from({ length: skeletons }, (_, i) => (
             <li key={`pending-${i}`}>
-              <MediaSkeleton aspectRatio={aspectRatio} number={images.length + i + 1} />
+              <MediaSkeleton aspectRatio={aspectRatio} number={cards.length + i + 1} />
             </li>
           ))}
         </ul>
       )}
 
-      {images.length > 1 && (
+      {cards.length > 1 && (
         <div className="seclai-gallery-actions">
           {/* aria-disabled rather than disabled, so a keyboard user's focus stays put. */}
           <button
@@ -93,7 +111,7 @@ export function MediaGallery({
             aria-disabled={downloading}
             onClick={downloadAll}
           >
-            {downloading ? "Downloading…" : `Download all ${images.length}`}
+            {downloading ? "Downloading…" : `Download all ${cards.length}`}
           </button>
         </div>
       )}
@@ -105,6 +123,7 @@ export function MediaGallery({
       {images.length > 0 && (
         <MediaViewer
           attachments={images}
+          numbers={imageNumbers}
           index={viewing}
           onIndexChange={setViewing}
           onClose={() => setViewing(null)}

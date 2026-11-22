@@ -1,4 +1,4 @@
-import { aspectRatioStyle, type MediaAspectRatio } from "../placeholders/MediaPreview";
+import { aspectRatioStyle, type MediaAspectRatio } from "./MediaPreview";
 
 export interface MediaSkeletonProps {
   /** The frame's aspect ratio. Defaults to `--seclai-media-aspect-ratio`, square unless you set it. */
@@ -17,7 +17,7 @@ export interface MediaSkeletonProps {
 export function MediaSkeleton({ aspectRatio, number, label }: MediaSkeletonProps) {
   const name = label ?? (number != null ? `Image ${number} is being generated` : "Image is being generated");
   return (
-    <div className="seclai-media seclai-media-image seclai-media-skeleton" role="img" aria-label={name}>
+    <div className="seclai-media seclai-media-card seclai-media-image seclai-media-skeleton" role="img" aria-label={name}>
       <div className="seclai-media-frame" style={aspectRatioStyle(aspectRatio)}>
         {number != null && <span className="seclai-media-badge">{number}</span>}
       </div>

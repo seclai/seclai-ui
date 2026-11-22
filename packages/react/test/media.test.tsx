@@ -101,6 +101,16 @@ describe("MediaPreview", () => {
     expect(attachmentFileName(attachment)).toBe(expected);
   });
 
+  it.each([
+    [file("abc", "image/png"), "image-2.png"],
+    [file("abc", "audio/mpeg"), "audio-2.mp3"],
+    [file("abc", "Video/MP4; codecs=avc1"), "video-2.mp4"],
+    [file("abc", "application/pdf"), "pdf-2.pdf"],
+    [file("abc", "application/zip"), "file-2.zip"],
+  ])("names a numbered %o after its kind, as %s", (attachment, expected) => {
+    expect(attachmentFileName(attachment, 2)).toBe(expected);
+  });
+
   it("renders actions after the download link", () => {
     render(
       <MediaPreview
@@ -176,13 +186,247 @@ describe("MediaPreview", () => {
   });
 
   it("names an unnamed file from its id and mime type", () => {
-    render(<MediaPreview attachment={file("doc", "application/pdf")} />);
-    expect(screen.getByRole("link", { name: "doc.pdf" }).getAttribute("download")).toBe("doc.pdf");
+    // A PDF used to be the example here; it gets a card now.
+    render(<MediaPreview attachment={file("doc", "application/zip")} />);
+    expect(screen.getByRole("link", { name: "doc.zip" }).getAttribute("download")).toBe("doc.zip");
   });
 
   it("renders on the server", () => {
     const html = renderToString(<MediaPreview attachment={file("a", "image/png", "out.png")} number={1} />);
     expect(html).toContain('alt="out.png"');
+  });
+});
+
+describe("MediaPreview for audio, video and PDF", () => {
+  const audio = (c: HTMLElement) => c.querySelector("audio")!;
+  const video = (c: HTMLElement) => c.querySelector("video")!;
+  const object = (c: HTMLElement) => c.querySelector("object")!;
+
+  it("plays audio with the browser's controls, loading only its metadata up front", () => {
+    const { container } = render(<MediaPreview attachment={file("a", "audio/mpeg", "speech.mp3")} number={2} />);
+    const el = audio(container);
+    expect(el.getAttribute("src")).toBe("/api/seclai/download?attachmentId=a");
+    expect(el.hasAttribute("controls")).toBe(true);
+    expect(el.getAttribute("preload")).toBe("metadata");
+    expect(el.getAttribute("aria-label")).toBe("speech.mp3");
+    // No aspect-ratio frame for audio.
+    expect(container.querySelector(".seclai-media-frame")).toBeNull();
+    expect(container.querySelector("figure")!.className).toBe("seclai-media seclai-media-card seclai-media-audio");
+    expect(within(container.querySelector(".seclai-media-head")!).getByText("speech.mp3")).toBeTruthy();
+  });
+
+  it("plays video with the browser's controls, inline, in a frame", () => {
+    const { container } = render(
+      <MediaPreview attachment={file("v", "video/mp4", "clip.mp4")} aspectRatio="16 / 9" number={1} />,
+    );
+    const el = video(container);
+    expect(el.getAttribute("src")).toBe("/api/seclai/download?attachmentId=v");
+    expect(el.hasAttribute("controls")).toBe(true);
+    expect(el.getAttribute("preload")).toBe("metadata");
+    expect(el.hasAttribute("playsinline")).toBe(true);
+    expect(el.getAttribute("aria-label")).toBe("clip.mp4");
+    expect(frameOf(el).style.aspectRatio).toBe("16 / 9");
+    expect(within(frameOf(el)).getByText("1").className).toBe("seclai-media-badge");
+  });
+
+  it("uses the video's own ratio once its metadata loads, and the CSS default before", () => {
+    const { container } = render(<MediaPreview attachment={file("v", "video/webm")} />);
+    const el = video(container);
+    expect(frameOf(el).style.aspectRatio).toBe("");
+    Object.defineProperty(el, "videoWidth", { value: 1920 });
+    Object.defineProperty(el, "videoHeight", { value: 1080 });
+    fireEvent.loadedMetadata(el);
+    expect(frameOf(el).style.aspectRatio).toBe("1920 / 1080");
+  });
+
+  it("prefers the aspectRatio prop over the video's own ratio", () => {
+    const { container } = render(<MediaPreview attachment={file("v", "video/webm")} aspectRatio={1} />);
+    const el = video(container);
+    Object.defineProperty(el, "videoWidth", { value: 1920 });
+    Object.defineProperty(el, "videoHeight", { value: 1080 });
+    fireEvent.loadedMetadata(el);
+    expect(frameOf(el).style.aspectRatio).toBe("1");
+  });
+
+  it("measures a video whose metadata loaded before hydration", () => {
+    vi.spyOn(HTMLMediaElement.prototype, "readyState", "get").mockReturnValue(1);
+    vi.spyOn(HTMLVideoElement.prototype, "videoWidth", "get").mockReturnValue(640);
+    vi.spyOn(HTMLVideoElement.prototype, "videoHeight", "get").mockReturnValue(360);
+    const { container } = render(<MediaPreview attachment={file("v", "video/mp4")} />);
+    expect(frameOf(video(container)).style.aspectRatio).toBe("640 / 360");
+  });
+
+  it("shows a PDF in an <object>, with a download link for browsers without a viewer", () => {
+    const { container } = render(<MediaPreview attachment={file("p", "application/pdf", "report.pdf")} number={3} />);
+    const el = object(container);
+    expect(el.getAttribute("type")).toBe("application/pdf");
+    expect(el.getAttribute("data")).toBe("/api/seclai/download?attachmentId=p");
+    expect(el.getAttribute("aria-label")).toBe("report.pdf");
+    const fallback = within(el).getByRole("link", { name: "Download report.pdf" });
+    expect(fallback.getAttribute("href")).toBe("/api/seclai/download?attachmentId=p");
+    expect(fallback.getAttribute("download")).toBe("report.pdf");
+    expect(el.textContent).toContain("This browser can't show the PDF here.");
+    expect(within(container.querySelector(".seclai-media-head")!).getByText("3").className).toBe(
+      "seclai-media-badge",
+    );
+    // The PDF keeps its own shape, whatever the aspectRatio.
+    expect(frameOf(el).style.aspectRatio).toBe("");
+  });
+
+  it("names the fallback link and the object after the number for an unnamed PDF", () => {
+    const { container } = render(<MediaPreview attachment={file("p", "application/pdf")} number={2} />);
+    expect(object(container).getAttribute("aria-label")).toBe("PDF 2");
+    expect(within(object(container)).getByRole("link", { name: "Download PDF 2" }).getAttribute("download")).toBe(
+      "pdf-2.pdf",
+    );
+  });
+
+  it("never previews SVG as anything but an image, nor HTML at all", () => {
+    const { container, rerender } = render(<MediaPreview attachment={file("s", "image/svg+xml", "x.svg")} />);
+    expect(container.querySelector("img")!.getAttribute("src")).toBe("/api/seclai/download?attachmentId=s");
+    expect(container.querySelectorAll("object, embed, iframe, video, audio")).toHaveLength(0);
+
+    rerender(<MediaPreview attachment={file("h", "text/html", "x.html")} number={1} />);
+    expect(container.querySelectorAll("img, object, embed, iframe, video, audio")).toHaveLength(0);
+    expect(screen.getByRole("link", { name: "x.html" }).getAttribute("download")).toBe("x.html");
+  });
+
+  it.each([
+    ["audio/mpeg; codecs=mp3", "audio"],
+    ["AUDIO/WAV", "audio"],
+    ["Video/MP4; codecs=\"avc1.42E01E\"", "video"],
+    ["APPLICATION/PDF", "object"],
+    ["application/pdf; charset=binary", "object"],
+    ["IMAGE/PNG", "img"],
+  ])("matches %s case-insensitively and without parameters", (mime, tag) => {
+    const { container } = render(<MediaPreview attachment={file("x", mime)} />);
+    expect(container.querySelector(tag)).toBeTruthy();
+  });
+
+  it.each([
+    ["audio/ogg", "Audio 4"],
+    ["video/mp4", "Video 4"],
+    ["application/pdf", "PDF 4"],
+  ])("names an unnamed %s file %s", (mime, label) => {
+    const { container } = render(<MediaPreview attachment={file("x", mime)} number={4} />);
+    const el = container.querySelector("audio, video, object")!;
+    expect(el.getAttribute("aria-label")).toBe(label);
+    expect(screen.getAllByRole("link", { name: `Download ${label}` }).length).toBeGreaterThan(0);
+  });
+
+  it("treats an empty name as no name", () => {
+    const { container } = render(
+      <>
+        <MediaPreview attachment={file("a", "audio/mpeg", "")} number={1} />
+        <MediaPreview attachment={file("z", "application/zip", "")} number={2} />
+      </>,
+    );
+    expect(container.querySelector(".seclai-media-title")!.textContent).toBe("Audio");
+    expect(screen.getByRole("link", { name: "file-2.zip" }).getAttribute("download")).toBe("file-2.zip");
+  });
+
+  it.each([
+    ["audio/mpeg", "audio"],
+    ["video/mp4", "video"],
+    ["application/pdf", "PDF"],
+  ])("gives a %s card the number badge, download link and actions", (mime, kind) => {
+    const actions = vi.fn((a: AgentAttachment) => <button type="button">Use {a.id}</button>);
+    const attachment = file("x", mime, `out.${kind}`);
+    const { container } = render(<MediaPreview attachment={attachment} number={5} actions={actions} />);
+    expect(actions).toHaveBeenCalledWith(attachment);
+    expect(container.querySelector(".seclai-media-badge")!.textContent).toBe("5");
+    const bar = container.querySelector("figcaption.seclai-media-bar") as HTMLElement;
+    const link = within(bar).getByRole("link", { name: `Download out.${kind}` });
+    expect(link.getAttribute("href")).toBe(attachment.url);
+    expect(link.getAttribute("download")).toBe(`out.${kind}`);
+    expect(within(bar).getByRole("button", { name: "Use x" })).toBeTruthy();
+  });
+
+  it.each([
+    ["audio/mpeg", "audio", "Couldn't load the audio."],
+    ["video/mp4", "video", "Couldn't load the video."],
+  ])("says so when the %s can't be loaded, and keeps the download link", (mime, tag, message) => {
+    const { container } = render(<MediaPreview attachment={file("x", mime, "out")} number={1} />);
+    fireEvent.error(container.querySelector(tag)!);
+    expect(container.querySelector(tag)).toBeNull();
+    expect(screen.getByText(message).className).toBe("seclai-media-error");
+    expect(screen.getByRole("link", { name: "Download out" })).toBeTruthy();
+    expect(container.querySelector(".seclai-media-badge")!.textContent).toBe("1");
+  });
+
+  it("keeps the video's frame when it can't be loaded", () => {
+    const { container } = render(<MediaPreview attachment={file("x", "video/mp4")} aspectRatio="4 / 3" />);
+    fireEvent.error(video(container));
+    expect(frameOf(screen.getByText("Couldn't load the video.")).style.aspectRatio).toBe("4 / 3");
+  });
+
+  it("says so when the PDF can't be loaded, and keeps the download link", () => {
+    const { container } = render(<MediaPreview attachment={file("p", "application/pdf", "r.pdf")} />);
+    // React doesn't pass on an <object>'s error event, so this is a native one.
+    act(() => {
+      object(container).dispatchEvent(new Event("error"));
+    });
+    expect(container.querySelector("object")).toBeNull();
+    expect(screen.getByText("Couldn't load the PDF.")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Download r.pdf" })).toBeTruthy();
+  });
+
+  it("tries again when a failed file's URL changes", () => {
+    const { container, rerender } = render(<MediaPreview attachment={file("p", "application/pdf")} />);
+    act(() => {
+      object(container).dispatchEvent(new Event("error"));
+    });
+    rerender(<MediaPreview attachment={file("q", "application/pdf")} />);
+    expect(object(container).getAttribute("data")).toBe("/api/seclai/download?attachmentId=q");
+    // And still listens for the new one failing.
+    act(() => {
+      object(container).dispatchEvent(new Event("error"));
+    });
+    expect(screen.getByText("Couldn't load the PDF.")).toBeTruthy();
+
+    const { container: media, rerender: rerenderMedia } = render(<MediaPreview attachment={file("a", "audio/mpeg")} />);
+    fireEvent.error(audio(media));
+    rerenderMedia(<MediaPreview attachment={file("b", "audio/mpeg")} />);
+    expect(audio(media).getAttribute("src")).toBe("/api/seclai/download?attachmentId=b");
+  });
+
+  it.each([
+    ["audio/mpeg", "Couldn't load the audio."],
+    ["video/mp4", "Couldn't load the video."],
+  ])("says so when the %s failed before hydration, without an error event", (mime, message) => {
+    // jsdom's media elements have no `error`.
+    Object.defineProperty(HTMLMediaElement.prototype, "error", { configurable: true, get: () => ({ code: 4 }) });
+    try {
+      render(<MediaPreview attachment={file("x", mime)} />);
+      expect(screen.getByText(message)).toBeTruthy();
+    } finally {
+      delete (HTMLMediaElement.prototype as { error?: unknown }).error;
+    }
+  });
+
+  it("doesn't make a video or PDF a button, even with onOpen", () => {
+    const onOpen = vi.fn();
+    render(
+      <>
+        <MediaPreview attachment={file("v", "video/mp4")} onOpen={onOpen} />
+        <MediaPreview attachment={file("p", "application/pdf")} onOpen={onOpen} />
+        <MediaPreview attachment={file("a", "audio/mpeg")} onOpen={onOpen} />
+      </>,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("renders each kind on the server", () => {
+    const html = renderToString(
+      <>
+        <MediaPreview attachment={file("a", "audio/mpeg", "a.mp3")} number={1} />
+        <MediaPreview attachment={file("v", "video/mp4", "v.mp4")} number={2} />
+        <MediaPreview attachment={file("p", "application/pdf", "p.pdf")} number={3} />
+      </>,
+    );
+    expect(html).toContain('<audio src="/api/seclai/download?attachmentId=a" controls="" preload="metadata"');
+    expect(html).toContain("<video");
+    expect(html).toContain('<object type="application/pdf" data="/api/seclai/download?attachmentId=p"');
   });
 });
 
@@ -335,6 +579,110 @@ describe("MediaGallery", () => {
     expect(screen.getByRole("img", { name: "Image 2 is being generated" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "Image 3 is being generated" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Download all/ })).toBeNull();
+  });
+
+  describe("with audio, video and PDFs", () => {
+    const mixed = [
+      file("i1", "image/png", "cover.png"),
+      file("z", "application/zip", "all.zip"),
+      file("au", "audio/mpeg"),
+      file("i2", "image/jpeg"),
+      file("t", "text/html", "page.html"),
+      file("vi", "VIDEO/MP4; codecs=avc1"),
+      file("pd", "application/pdf", "report.pdf"),
+    ];
+
+    const cardsOf = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll(".seclai-gallery-grid > li > figure"));
+
+    it("lays them out as cards in the attachments' order, numbered like the agent's list", () => {
+      const { container } = render(<MediaGallery attachments={mixed} />);
+      const cards = cardsOf(container).map((c) => [
+        c.className.split(" ").at(-1),
+        c.querySelector(".seclai-media-badge")!.textContent,
+      ]);
+      expect(cards).toEqual([
+        ["seclai-media-image", "1"],
+        ["seclai-media-audio", "2"],
+        ["seclai-media-image", "3"],
+        ["seclai-media-video", "4"],
+        ["seclai-media-pdf", "5"],
+      ]);
+      expect(container.querySelector("audio")!.getAttribute("aria-label")).toBe("Audio 2");
+      expect(container.querySelector("video")!.getAttribute("aria-label")).toBe("Video 4");
+      expect(screen.getByRole("link", { name: "Download Image 3" }).getAttribute("download")).toBe("image-3.jpg");
+      expect(screen.getByRole("link", { name: "Download Video 4" }).getAttribute("download")).toBe("video-4.mp4");
+    });
+
+    it("keeps other files as download links after the cards", () => {
+      const { container } = render(<MediaGallery attachments={mixed} />);
+      const zip = screen.getByRole("link", { name: "all.zip" });
+      const html = screen.getByRole("link", { name: "page.html" });
+      for (const link of [zip, html]) {
+        expect(link.closest(".seclai-gallery-grid")).toBeNull();
+        expect(container.querySelector(".seclai-gallery-grid")!.compareDocumentPosition(link)).toBe(
+          Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+      }
+    });
+
+    it("passes each card's attachment and number to actions", () => {
+      const actions = vi.fn((attachment: AgentAttachment, number: number) => (
+        <button type="button">Act {number}</button>
+      ));
+      render(<MediaGallery attachments={mixed} actions={actions} />);
+      expect(actions.mock.calls.map(([a, n]) => `${a.id} ${n}`)).toEqual(["i1 1", "au 2", "i2 3", "vi 4", "pd 5"]);
+      expect(screen.getAllByRole("button", { name: /^Act/ })).toHaveLength(5);
+    });
+
+    it("gives the aspect ratio to image and video frames, not to the PDF", () => {
+      const { container } = render(<MediaGallery attachments={mixed} aspectRatio="16 / 9" />);
+      const ratios = Array.from(container.querySelectorAll<HTMLElement>(".seclai-media-frame")).map(
+        (f) => f.style.aspectRatio,
+      );
+      expect(ratios).toEqual(["16 / 9", "16 / 9", "16 / 9", ""]);
+    });
+
+    it("opens the viewer from image cards only, with the image's card number", async () => {
+      const user = userEvent.setup();
+      render(<MediaGallery attachments={mixed} />);
+      expect(screen.getAllByRole("button", { name: /full size/ }).map((b) => b.getAttribute("aria-label"))).toEqual([
+        "Open cover.png full size",
+        "Open Image 3 full size",
+      ]);
+
+      await user.click(screen.getByRole("button", { name: "Open Image 3 full size" }));
+      const dialog = document.querySelector("dialog")!;
+      expect(dialog.querySelector("img")!.getAttribute("alt")).toBe("Image 3");
+      expect(within(dialog).getByText("2 of 2")).toBeTruthy();
+      expect(within(dialog).getByRole("link", { name: "Download" }).getAttribute("download")).toBe("image-3.jpg");
+    });
+
+    it("downloads every card's file with Download all, but not the other files", async () => {
+      vi.useFakeTimers();
+      const saved: string[] = [];
+      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+        saved.push(this.download);
+      });
+      render(<MediaGallery attachments={mixed} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Download all 5" }));
+      await act(() => vi.advanceTimersByTimeAsync(400 * 5));
+      expect(saved).toEqual(["cover.png", "audio-2.mp3", "image-3.jpg", "video-4.mp4", "report.pdf"]);
+    });
+
+    it("offers Download all for an image and an audio file", () => {
+      render(<MediaGallery attachments={[mixed[0]!, mixed[2]!]} />);
+      expect(screen.getByRole("button", { name: "Download all 2" })).toBeTruthy();
+    });
+
+    it("numbers pending skeletons on from the last card", () => {
+      render(<MediaGallery attachments={mixed} pending={2} />);
+      const items = Array.from(document.querySelectorAll(".seclai-gallery-grid > li"));
+      expect(items).toHaveLength(7);
+      expect(within(items[5] as HTMLElement).getByRole("img", { name: "Image 6 is being generated" })).toBeTruthy();
+      expect(within(items[6] as HTMLElement).getByRole("img", { name: "Image 7 is being generated" })).toBeTruthy();
+    });
   });
 
   it("renders nothing much for no attachments", () => {
