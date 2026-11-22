@@ -90,20 +90,58 @@ export async function fetchAttachmentReferences(
   return readJson(await fetch(endpoints.attachmentReferences, { signal }));
 }
 
+/** Options for {@link uploadFile}. */
+export interface UploadFileOptions extends EndpointRequestOptions {
+  /**
+   * Your app's data for this upload, for example the session it belongs to or
+   * the file's role. Added to the upload URL's query string, after any query
+   * the URL already has; the `upload` handler passes them to `authorizeUpload`
+   * and `upload.onUpload`. They are visible in the URL and in server logs, so
+   * keep secrets out of them.
+   */
+  params?: Record<string, string> | URLSearchParams;
+}
+
 /**
  * Upload one file through the `upload` handler. Pass the returned `id` to
  * `start({ uploadIds })` from `useAgentRun`.
  *
- * @param options `signal` aborts the upload.
+ * The result is the handler's JSON response. When your `upload.onUpload`
+ * returns its own `Response`, name its type: `uploadFile<MyUpload>(…)`. The
+ * type isn't checked at run time.
+ *
+ * @param options `signal` aborts the upload. `params` is added to the upload
+ *   URL's query string.
  * @throws An `Error` with the handler's error message when the response isn't
  *   OK. Rejects as `fetch` does on a network failure or when `signal` aborts.
+ *
+ * @example
+ * const upload = await uploadFile<MyUpload>(endpoints, file, {
+ *   params: { sessionId, kind: "headshot" },
+ * });
  */
-export async function uploadFile(
+export async function uploadFile<T = UploadResult>(
   endpoints: AgentEndpoints,
   file: File,
-  { signal }: EndpointRequestOptions = {},
-): Promise<UploadResult> {
+  { signal, params }: UploadFileOptions = {},
+): Promise<T> {
   const form = new FormData();
   form.set("file", file);
-  return readJson(await fetch(endpoints.upload, { method: "POST", body: form, signal }));
+  const url = params ? withQuery(endpoints.upload, params) : endpoints.upload;
+  return readJson<T>(await fetch(url, { method: "POST", body: form, signal }));
+}
+
+/**
+ * Add `params` to `url`'s query string, keeping a relative URL relative. The
+ * new params go after any already there, so the handler, which keeps the last
+ * value of a repeated key, sees them.
+ */
+function withQuery(url: string, params: Record<string, string> | URLSearchParams): string {
+  const query = new URLSearchParams(params).toString();
+  if (!query) return url;
+  const hashAt = url.indexOf("#");
+  const base = hashAt < 0 ? url : url.slice(0, hashAt);
+  const hash = hashAt < 0 ? "" : url.slice(hashAt);
+  const separator = !base.includes("?") ? "?" : base.endsWith("?") || base.endsWith("&") ? "" : "&";
+  return `${base}${separator}${query}${hash}`;
 }

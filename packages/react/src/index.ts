@@ -24,6 +24,7 @@ export {
   uploadFile,
   type AgentEndpoints,
   type EndpointRequestOptions,
+  type UploadFileOptions,
 } from "./endpoints";
 export type {
   AcceptedAttachmentSlot,

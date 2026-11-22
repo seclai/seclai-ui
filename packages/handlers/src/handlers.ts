@@ -91,6 +91,13 @@ async function readLimitedForm(req: Request, limit: number): Promise<FormData | 
   }
 }
 
+/** An upload request's query parameters. See {@link UploadParams}. */
+function uploadParams(req: Request): UploadParams {
+  const params: UploadParams = Object.create(null);
+  for (const [key, value] of new URL(req.url).searchParams) params[key] = value;
+  return params;
+}
+
 /** What the `upload` handler returns, and what `upload.onUpload` receives. */
 export interface UploadResult {
   /** Pass this in `uploadIds` to the `run` handler. */
@@ -133,12 +140,17 @@ export interface SeclaiUploadOptions<Ctx = undefined> {
    * `context` is the app's context for this request, the same value the
    * access-control hooks get. It is resolved before the file is uploaded, so a
    * `context` that refuses does so before the file reaches Seclai.
+   *
+   * `params` is the upload URL's query string, as sent by `uploadFile`'s
+   * `params` option. See {@link AuthorizeUpload} for how it is parsed. It comes
+   * from the browser: validate it before you use it.
    */
   onUpload?(
     file: File,
     result: UploadResult,
     req: Request,
     context: Ctx,
+    params: UploadParams,
   ): void | Response | Promise<void | Response>;
 }
 
@@ -224,6 +236,9 @@ export interface SeclaiHandlersOptions<Ctx = undefined> {
    * Called after `upload` has read the form, before the file is sent to Seclai.
    * Return nothing (or `true`) to upload it, or `false` or a `Response` to
    * refuse. `false` sends a 403.
+   *
+   * Its last argument is the upload URL's query parameters (see
+   * {@link UploadParams}), for example a `sessionId` to check against your data.
    */
   authorizeUpload?: AuthorizeUpload<Ctx>;
   /**
@@ -244,11 +259,27 @@ export type AuthorizeRun<Ctx = undefined> = (
   ctx: Ctx,
 ) => RunRequestBody | boolean | Response | void | Promise<RunRequestBody | boolean | Response | void>;
 
-/** See {@link SeclaiHandlersOptions.authorizeUpload}. */
+/**
+ * The query parameters of an upload request, for example the `sessionId` or
+ * the role of the file the browser sent with `uploadFile`'s `params` option.
+ * When a key is repeated, the last value wins. The object has no prototype, so
+ * a key the browser didn't send reads as `undefined`.
+ *
+ * They come from the browser and the handler doesn't check them: validate them
+ * (and check that the user may use them) in your hooks. The handler itself
+ * doesn't read them.
+ */
+export type UploadParams = Record<string, string | undefined>;
+
+/**
+ * See {@link SeclaiHandlersOptions.authorizeUpload}. `params` is the upload
+ * URL's query string: see {@link UploadParams}.
+ */
 export type AuthorizeUpload<Ctx = undefined> = (
   req: Request,
   file: File,
   ctx: Ctx,
+  params: UploadParams,
 ) => boolean | Response | void | Promise<boolean | Response | void>;
 
 /** The ids a `download` request asks for. */
@@ -595,9 +626,12 @@ export function createSeclaiHandlers<Ctx>(
         logger?.info("upload received", fileFields);
         if (maxBytes !== undefined && file.size > maxBytes) return refused("upload", tooLarge(), fileFields);
 
+        // Parsed once for both hooks, and only when there is one to read them.
+        const params = authorizeUpload || onUpload ? uploadParams(req) : {};
+
         if (authorizeUpload) {
           const result = await callHook("authorizeUpload", req, resolve, (ctx) =>
-            authorizeUpload(req, file, ctx),
+            authorizeUpload(req, file, ctx, params),
           );
           if ("response" in result) return refused("upload", result.response, fileFields);
           const allowed = result.value;
@@ -664,7 +698,7 @@ export function createSeclaiHandlers<Ctx>(
 
         if (onUpload) {
           try {
-            const replacement = await onUpload(file, result, req, uploadContext as Ctx);
+            const replacement = await onUpload(file, result, req, uploadContext as Ctx, params);
             if (replacement instanceof Response) return replacement;
           } catch (err) {
             // The app's own error: its message could hold anything, so it stays

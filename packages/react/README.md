@@ -160,7 +160,7 @@ const run = useAgentRun();
 To upload files and run the agent from your own UI, use the helpers the components are built on:
 
 - **`createEndpoints({ basePath, agentId })`** returns the handler URLs (`AgentEndpoints`): `attachmentReferences`, `upload`, `run`, and `download(runId, attachmentId, name?)`. Pass it the same options as `useAgentRun`.
-- **`uploadFile(endpoints, file, { signal }?)`** uploads one file and resolves with its `id`.
+- **`uploadFile(endpoints, file, { signal, params }?)`** uploads one file and resolves with its `id`. `params` is added to the upload URL's query string, for the server's upload hooks. See [Sending data with an upload](#sending-data-with-an-upload).
 - **`fetchAttachmentReferences(endpoints, { signal }?)`** resolves with the files the agent accepts (`accepted_attachments`) and whether it needs any (`requires_uploads`).
 
 On an error response, `uploadFile` and `fetchAttachmentReferences` reject with an `Error` whose message comes from the handler. On a network failure or an aborted `signal`, they reject as `fetch` does.
@@ -188,6 +188,21 @@ A run's `attachments` already have a `url`. To show a file from a run you stored
 ```tsx
 <a href={endpoints.download(saved.runId, saved.attachmentId, saved.name)}>{saved.name}</a>
 ```
+
+#### Sending data with an upload
+
+Pass `params` to tell the server what an upload is for, such as the session it belongs to or its role. They're added to the upload URL, after any query string it already has, and `@seclai/handlers` passes them to `authorizeUpload` and `upload.onUpload`. They're visible in the URL, so keep secrets out of them.
+
+If the server's `onUpload` returns its own record, name its type:
+
+```ts
+type MyUpload = { id: string; uploadId: string; sessionId: string; kind: "headshot" | "style" };
+
+const upload = await uploadFile<MyUpload>(endpoints, file, { params: { sessionId, kind: "headshot" } });
+upload.kind; // "headshot" | "style"
+```
+
+The type isn't checked at run time: it's whatever the server sends. Without one, the result is an `UploadResult`. When the record replaces the default JSON, start the run with the Seclai upload id it holds (`uploadId` here), not your record's own `id`.
 
 ## Styling
 
