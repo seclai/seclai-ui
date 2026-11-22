@@ -18,6 +18,7 @@ import {
 import { createEndpoints, uploadFile, type AgentEndpoints } from "./endpoints";
 import { MarkdownContent } from "./placeholders/MarkdownContent";
 import { MediaGallery } from "./media/MediaGallery";
+import { RunProgress } from "./RunProgress";
 import type { AgentAttachment, AgentEndpointOptions } from "./types";
 import { useAgentRun } from "./useAgentRun";
 
@@ -583,7 +584,7 @@ export function AgentChat({
             {run.text ? (
               <MarkdownContent content={run.text} />
             ) : (
-              <p className="seclai-notice">Thinking…</p>
+              <RunProgress run={run} />
             )}
           </li>
         )}

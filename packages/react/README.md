@@ -32,6 +32,7 @@ export function App() {
 - **`AgentRunForm`** builds a text input and file inputs from the agent's accepted attachments, uploads the files, then runs with text and files together.
 - **`AgentChat`** sends each message as a run with a shared session id and streams the reply.
 - **`SeclaiAgent`** renders one of the two based on `mode`.
+- **`RunProgress`** shows a running run's steps and elapsed time. See [below](#runprogress).
 
 ### Files in `AgentChat`
 
@@ -133,27 +134,34 @@ await start({ input: "Hello", uploadIds: ["..."], sessionId: "..." });
 
 Options also take `basePath` and `agentId`, as the components do.
 
-Runs that generate images can take a minute or two, so show the time elapsed:
+### `RunProgress`
+
+Runs that generate images can take a minute or two. `RunProgress` shows a running run's steps and the time elapsed, and renders nothing otherwise:
 
 ```tsx
-function Elapsed({ startedAt }: { startedAt: number }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
-  return <>{Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}</>;
-}
+import { RunProgress, useAgentRun } from "@seclai/react";
 
 const run = useAgentRun();
 
-{run.status === "running" && run.startedAt !== null && (
-  <p>
-    Usually takes a minute or two · <Elapsed startedAt={run.startedAt} />
-  </p>
-)}
+<RunProgress
+  run={run}
+  message={(seconds) => (seconds < 150 ? "Generating images usually takes a minute or two." : "Still working…")}
+/>
 ```
+
+- It shows "Starting the run…" until the first step, then each step's name and message, with ✓ for finished steps and ● for the current one.
+- The clock reads `m:ss`, and screen readers get "42 seconds elapsed". Steps and the message are announced as they change, but the clock isn't, so keep the seconds out of `message`.
+- `run` needs only `status`, `steps` and `startedAt`, so a plain object works too.
+- `AgentChat` shows it until the reply starts streaming.
+
+| Prop | |
+|---|---|
+| `run` | Required. `{ status, steps, startedAt }`, such as a `useAgentRun` result |
+| `showSteps` | Show the step list. Defaults to `true` |
+| `message` | A note next to the clock: a node, or `(seconds) => ReactNode` |
+| `className` | Added to the outer element |
+
+For just the clock, `useElapsed(startedAt, running)` returns whole seconds since `startedAt`, ticking while `running`. It's 0 on the first render, so server and client markup match.
 
 ### Building your own UI
 
