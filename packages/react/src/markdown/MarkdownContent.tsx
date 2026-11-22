@@ -156,7 +156,9 @@ interface BlockProps {
   onTree?: OnTree;
 }
 
-const Block = memo(
+// `memo(...)` is a call, which a bundler keeps, along with all it refers to,
+// unless it's marked pure: then apps that don't render Markdown leave it out.
+const Block = /* @__PURE__ */ memo(
   function Block({ text, pipeline, onTree }: BlockProps) {
     return (
       <Markdown
@@ -234,7 +236,7 @@ class Splitter {
  * While the text streams in, it's split into blocks and only the last one is
  * parsed again as tokens arrive. Pass `streaming` until it's complete.
  */
-export const MarkdownContent = memo(function MarkdownContent({
+export const MarkdownContent = /* @__PURE__ */ memo(function MarkdownContent({
   content,
   streaming = false,
   extensions,

@@ -107,27 +107,28 @@ const svgAttributes: Record<string, string[]> = {
 // keyboard shortcut in the app, and `tabIndex` reorder its focus.
 const DROPPED = new Set(["accessKey", "tabIndex"]);
 
-const base = defaultSchema.attributes ?? {};
-
-export const sanitizeSchema: Schema = {
-  ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames ?? []), ...SVG_TAGS],
-  attributes: {
-    ...base,
-    "*": (base["*"] ?? []).filter((attribute) => typeof attribute !== "string" || !DROPPED.has(attribute)),
-    ...Object.fromEntries(SVG_TAGS.map((tag) => [tag, [...SVG_COMMON, ...(svgAttributes[tag] ?? [])]])),
-  },
-  protocols: {
-    ...defaultSchema.protocols,
-    href: ["http", "https", "mailto"],
-    src: ["http", "https"],
-  },
-  // Dropped with their content. Other disallowed elements, such as `form`, are
-  // unwrapped and their content kept.
-  strip: ["script", "style", "foreignObject", "iframe", "noscript", "template"],
-};
-
-const CLOBBER_PREFIX = defaultSchema.clobberPrefix ?? "user-content-";
+// Built in a function marked pure, as is `memo(...)` in `MarkdownContent`, so
+// apps that don't render Markdown don't bundle it, or `rehype-sanitize`.
+export const sanitizeSchema: Schema = /* @__PURE__ */ (() => {
+  const base = defaultSchema.attributes ?? {};
+  return {
+    ...defaultSchema,
+    tagNames: [...(defaultSchema.tagNames ?? []), ...SVG_TAGS],
+    attributes: {
+      ...base,
+      "*": (base["*"] ?? []).filter((attribute) => typeof attribute !== "string" || !DROPPED.has(attribute)),
+      ...Object.fromEntries(SVG_TAGS.map((tag) => [tag, [...SVG_COMMON, ...(svgAttributes[tag] ?? [])]])),
+    },
+    protocols: {
+      ...defaultSchema.protocols,
+      href: ["http", "https", "mailto"],
+      src: ["http", "https"],
+    },
+    // Dropped with their content. Other disallowed elements, such as `form`, are
+    // unwrapped and their content kept.
+    strip: ["script", "style", "foreignObject", "iframe", "noscript", "template"],
+  };
+})();
 
 const isElement = (node: RootContent | ElementContent | Root): node is Element => node.type === "element";
 
@@ -151,6 +152,7 @@ const URL_REFERENCE = /url\(\s*(['"]?)([^)'"]*)\1\s*\)/gi;
  * can't load an outside resource, which could track that it was viewed.
  */
 export function rehypeSafeReferences() {
+  const prefix = defaultSchema.clobberPrefix ?? "user-content-";
   return (tree: Root) => {
     walk(tree, (element, _parent, inSvg) => {
       const { properties } = element;
@@ -162,7 +164,7 @@ export function rehypeSafeReferences() {
           // Footnote links too: their ids already had the prefix before the
           // sanitizer added it again.
           if (value.startsWith("#")) {
-            properties[key] = `#${CLOBBER_PREFIX}${value.slice(1)}`;
+            properties[key] = `#${prefix}${value.slice(1)}`;
           } else if (inSvg && element.tagName !== "a") {
             delete properties[key];
           }
@@ -173,7 +175,7 @@ export function rehypeSafeReferences() {
           let external = false;
           const rewritten = value.replace(URL_REFERENCE, (_, _quote, target: string) => {
             if (!target.startsWith("#")) external = true;
-            return `url(#${CLOBBER_PREFIX}${target.slice(1)})`;
+            return `url(#${prefix}${target.slice(1)})`;
           });
           if (external || /url\(/i.test(rewritten.replace(URL_REFERENCE, ""))) delete properties[key];
           else properties[key] = rewritten;
