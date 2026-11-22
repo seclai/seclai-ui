@@ -259,6 +259,28 @@ import { MediaGallery, MediaPreview, MediaSkeleton, MediaViewer } from "@seclai/
 
 The stylesheet adds these variables for media: `--seclai-media-aspect-ratio` (a frame's ratio before its image loads, `1 / 1`), `--seclai-media-fit` (`object-fit` in the frame, `scale-down`, so small images keep their natural size), `--seclai-media-min-width` (a gallery column's minimum width, `220px`) and `--seclai-media-max-width` (a card's width outside a gallery, `480px`). The viewer is dark in both colour schemes.
 
+### Saving files
+
+The gallery's downloads are exported, for your own buttons:
+
+```tsx
+import { MediaGallery, saveFile } from "@seclai/react";
+
+<MediaGallery
+  attachments={run.attachments}
+  actions={(attachment, number) => (
+    <button onClick={async () => saveFile(await toJpeg(attachment.url), `thumbnail-${number}.jpg`)}>
+      Save as JPEG
+    </button>
+  )}
+/>
+```
+
+Here `toJpeg` is your own code that draws the image on a canvas and returns `canvas.toBlob()`'s result.
+
+- **`saveFile(urlOrBlob, filename)`** saves a URL or a `Blob` through a temporary `<a download>`. A URL that isn't `http:`, `https:`, `blob:` or relative (such as `javascript:`) is skipped with a warning. For a `Blob` it makes an object URL and revokes it 40 seconds later, once the browser has had time to start the download. Without a `document`, as in server rendering, it does nothing.
+- **`saveFiles(files, { delayMs, signal })`** saves `{ source, filename }` files one at a time with `saveFile`, waiting `delayMs` (400 ms) between them, as "Download all" does. A `source` is a URL or a `Blob`. It stops when `signal` aborts.
+
 ## Placeholders
 
 These are exported so the API is in place, but they're minimal until they're ported from the main Seclai app:

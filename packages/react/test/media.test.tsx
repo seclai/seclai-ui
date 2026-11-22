@@ -2,13 +2,15 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { renderToString } from "react-dom/server";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   attachmentFileName,
   MediaGallery,
   MediaPreview,
   MediaSkeleton,
   MediaViewer,
+  saveFile,
+  saveFiles,
   type AgentAttachment,
 } from "../src";
 
@@ -338,6 +340,158 @@ describe("MediaGallery", () => {
   it("renders nothing much for no attachments", () => {
     const { container } = render(<MediaGallery attachments={[]} />);
     expect(container.querySelector(".seclai-gallery")!.childElementCount).toBe(0);
+  });
+});
+
+describe("saveFile", () => {
+  function recordClicks() {
+    const saved: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(`${this.download} ${this.getAttribute("href")}`);
+    });
+    return saved;
+  }
+
+  it("saves a URL through a temporary download link", () => {
+    const saved = recordClicks();
+    saveFile("https://cdn.example.com/a.png", "thumbnail.png");
+    expect(saved).toEqual(["thumbnail.png https://cdn.example.com/a.png"]);
+    expect(document.querySelectorAll("body > a")).toHaveLength(0);
+  });
+
+  it("refuses a javascript: URL with a warning", () => {
+    const saved = recordClicks();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    saveFile("javascript:alert(1)", "evil.png");
+    expect(saved).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("not downloading evil.png"));
+  });
+
+  describe("with a Blob", () => {
+    // jsdom has no object URLs.
+    const create = vi.fn(() => "blob:https://app.example.com/1234");
+    const revoke = vi.fn();
+    const { createObjectURL, revokeObjectURL } = URL;
+    beforeAll(() => {
+      Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
+    });
+    afterAll(() => {
+      Object.assign(URL, { createObjectURL, revokeObjectURL });
+    });
+    afterEach(() => {
+      create.mockClear();
+      revoke.mockClear();
+    });
+
+    it("saves it through an object URL and revokes the URL later", async () => {
+      vi.useFakeTimers();
+      const saved = recordClicks();
+      const blob = new Blob(["jpeg"], { type: "image/jpeg" });
+
+      saveFile(blob, "thumbnail.jpg");
+
+      expect(create).toHaveBeenCalledWith(blob);
+      expect(saved).toEqual(["thumbnail.jpg blob:https://app.example.com/1234"]);
+      expect(document.querySelectorAll("body > a")).toHaveLength(0);
+      // The download may not have read the URL yet.
+      await vi.advanceTimersByTimeAsync(39_999);
+      expect(revoke).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(revoke).toHaveBeenCalledWith("blob:https://app.example.com/1234");
+    });
+
+    it("saves Blobs in saveFiles too", async () => {
+      vi.useFakeTimers();
+      const saved = recordClicks();
+      const done = saveFiles([
+        { source: "/a.png", filename: "a.png" },
+        { source: new Blob(["b"]), filename: "b.jpg" },
+      ]);
+      await vi.advanceTimersByTimeAsync(400);
+      await done;
+      expect(saved).toEqual(["a.png /a.png", "b.jpg blob:https://app.example.com/1234"]);
+    });
+  });
+
+  it("does nothing without a document", () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("document", undefined);
+    expect(() => saveFile("/a.png", "a.png")).not.toThrow();
+    expect(() => saveFile(new Blob(["a"]), "a.png")).not.toThrow();
+    vi.unstubAllGlobals();
+    expect(click).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("saveFiles", () => {
+  const files = ["a", "b", "c"].map((id) => ({ source: `/files/${id}.png`, filename: `${id}.png` }));
+
+  function recordClicks() {
+    const saved: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+    return saved;
+  }
+
+  it("waits 400 ms between files by default", async () => {
+    vi.useFakeTimers();
+    const saved = recordClicks();
+    let finished = false;
+    void saveFiles(files).then(() => (finished = true));
+
+    expect(saved).toEqual(["a.png"]);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(saved).toEqual(["a.png"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saved).toEqual(["a.png", "b.png"]);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(saved).toEqual(["a.png", "b.png", "c.png"]);
+    expect(finished).toBe(true);
+  });
+
+  it("takes another delay", async () => {
+    vi.useFakeTimers();
+    const saved = recordClicks();
+    void saveFiles(files, { delayMs: 1000 });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(saved).toEqual(["a.png"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saved).toEqual(["a.png", "b.png"]);
+  });
+
+  it("stops when the signal aborts", async () => {
+    vi.useFakeTimers();
+    const saved = recordClicks();
+    const controller = new AbortController();
+    const done = saveFiles(files, { signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(400);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(2000);
+    await done;
+    expect(saved).toEqual(["a.png", "b.png"]);
+  });
+
+  it("resolves as soon as the signal aborts, without waiting out the delay", async () => {
+    vi.useFakeTimers();
+    const saved = recordClicks();
+    const controller = new AbortController();
+    let finished = false;
+    void saveFiles(files, { delayMs: 60_000, signal: controller.signal }).then(() => (finished = true));
+    await vi.advanceTimersByTimeAsync(10);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finished).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(saved).toEqual(["a.png"]);
+  });
+
+  it("saves nothing when the signal has already aborted", async () => {
+    const saved = recordClicks();
+    await saveFiles(files, { signal: AbortSignal.abort() });
+    expect(saved).toEqual([]);
   });
 });
 
