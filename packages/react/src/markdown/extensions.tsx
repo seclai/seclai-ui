@@ -30,7 +30,7 @@ export interface MarkdownExtension {
   transform?: (markdown: string) => string;
 }
 
-const ExtensionsContext = createContext<readonly MarkdownExtension[]>([]);
+const ExtensionsContext = /* @__PURE__ */ createContext<readonly MarkdownExtension[]>([]);
 
 export interface SeclaiMarkdownProviderProps {
   /** The extensions for every `MarkdownContent` inside, including the ones `AgentChat` and `AgentRunForm` render. */

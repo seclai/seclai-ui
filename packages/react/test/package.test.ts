@@ -77,6 +77,54 @@ describe.skipIf(!existsSync(join(dist, "index.js")) && !process.env.CI)("the pub
     expect(inputs.filter((input) => packages.test(input))).toEqual([]);
   });
 
+  // An app's bundle only gets the Markdown renderer if the app renders Markdown:
+  // nothing at the top of a module may keep it alive, such as an unannotated
+  // `memo(...)` call, and katex, mermaid and the HTML parser stay out unless their
+  // entries are used. Measured by the bytes each dependency adds to the output.
+  describe("tree shaking", () => {
+    const markdown = /node_modules\/(?:\.pnpm\/[^/]+\/node_modules\/)?(react-markdown|rehype-sanitize|hast-util-sanitize|micromark[^/]*|mdast-util-[^/]+|hast-util-[^/]+|remark-[^/]+|unified)\//;
+    const optional = /node_modules\/(?:\.pnpm\/[^/]+\/node_modules\/)?(katex|remark-math|mermaid|rehype-raw|parse5)\//;
+
+    /** The dependencies that end up in an app importing `names`, and the app's code. */
+    async function bundled(names: string[]) {
+      const result = await build({
+        stdin: {
+          contents: `import { ${names.join(", ")} } from "./dist/index.js";\nconsole.log(${names.join(", ")});`,
+          resolveDir: root,
+        },
+        bundle: true,
+        minify: true,
+        treeShaking: true,
+        write: false,
+        format: "esm",
+        metafile: true,
+        external: ["react", "react-dom", "react/jsx-runtime"],
+        logLevel: "silent",
+      });
+      const [output] = Object.values(result.metafile.outputs);
+      const inputs = Object.entries(output!.inputs)
+        .filter(([, { bytesInOutput }]) => bytesInOutput > 0)
+        .map(([input]) => input);
+      const packages = (pattern: RegExp) => [...new Set(inputs.flatMap((input) => input.match(pattern)?.[1] ?? []))];
+      return { markdown: packages(markdown), optional: packages(optional), code: result.outputFiles[0]!.text };
+    }
+
+    it("leaves the Markdown renderer out of an app that doesn't render Markdown", async () => {
+      const app = await bundled(["MediaViewer", "saveFiles", "saveFile", "uploadFile", "useAgentRun", "createEndpoints"]);
+      expect(app.markdown).toEqual([]);
+      expect(app.optional).toEqual([]);
+      expect(app.code).not.toContain("seclai-markdown");
+      expect(app.code).not.toContain("user-content-");
+    });
+
+    it("bundles the Markdown renderer, but not katex, mermaid or the HTML parser, with MarkdownContent", async () => {
+      const app = await bundled(["MarkdownContent"]);
+      expect(app.markdown).toEqual(expect.arrayContaining(["react-markdown", "rehype-sanitize", "micromark"]));
+      expect(app.optional).toEqual([]);
+      expect(app.code).toContain("seclai-markdown");
+    });
+  });
+
   // Safari before 16.4 can't parse a regex lookbehind, and one anywhere in an
   // app's bundle stops the whole bundle from loading there. This checks each
   // entry with every dependency it pulls in. Mermaid's own code, loaded on
