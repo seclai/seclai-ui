@@ -5,7 +5,7 @@ Official Seclai UI components and server handlers for building apps on Seclai ag
 | Package | What it is |
 |---|---|
 | [`@seclai/handlers`](packages/handlers) | Framework-free server handlers (upload, run + SSE relay, download proxy) over [`@seclai/sdk`](https://github.com/seclai/seclai-javascript). Runs on Vercel, Netlify, Cloudflare Workers, Node, Deno, Bun. |
-| [`@seclai/react`](packages/react) | React components and hooks for running agents: run form and chat. Markdown and media output are placeholders for now, to be ported from the main Seclai app. Works in React, Next.js and Astro. |
+| [`@seclai/react`](packages/react) | React components and hooks for running agents: run form and chat, with streaming Markdown output (GFM, plus opt-in HTML, maths and Mermaid diagrams). Media previews beyond images are still to come. Works in React, Next.js and Astro. |
 
 Deploy-ready starters will live in their own public repos. `starters/` holds only the private [playground](starters/playground), a local test app that is never published.
 

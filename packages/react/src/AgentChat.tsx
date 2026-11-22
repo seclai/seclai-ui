@@ -16,7 +16,7 @@ import {
   useAcceptedAttachments,
 } from "./attachments";
 import { createEndpoints, uploadFile, type AgentEndpoints } from "./endpoints";
-import { MarkdownContent } from "./placeholders/MarkdownContent";
+import { MarkdownContent } from "./markdown/MarkdownContent";
 import { MediaGallery } from "./media/MediaGallery";
 import { RunProgress } from "./RunProgress";
 import type { AgentAttachment, AgentEndpointOptions } from "./types";
@@ -582,7 +582,7 @@ export function AgentChat({
         {streaming && (
           <li className="seclai-turn seclai-turn-assistant">
             {run.text ? (
-              <MarkdownContent content={run.text} />
+              <MarkdownContent content={run.text} streaming />
             ) : (
               <RunProgress run={run} />
             )}
