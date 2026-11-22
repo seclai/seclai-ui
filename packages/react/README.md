@@ -41,6 +41,7 @@ export function App() {
 - **`AgentChat`** sends each message as a run with a shared session id and streams the reply.
 - **`SeclaiAgent`** renders one of the two based on `mode`.
 - **`RunProgress`** shows a running run's steps and elapsed time. See [below](#runprogress).
+- **`MarkdownContent`** renders the agent's replies, including while they stream. See [Markdown](#markdown).
 
 ### Files in `AgentChat`
 
@@ -297,25 +298,141 @@ Here `toJpeg` is your own code that draws the image on a canvas and returns `can
 - **`saveFile(urlOrBlob, filename)`** saves a URL or a `Blob` through a temporary `<a download>`. A URL that isn't `http:`, `https:`, `blob:` or relative (such as `javascript:`) is skipped with a warning. For a `Blob` it makes an object URL and revokes it 40 seconds later, once the browser has had time to start the download. Without a `document`, as in server rendering, it does nothing.
 - **`saveFiles(files, { delayMs, signal })`** saves `{ source, filename }` files one at a time with `saveFile`, waiting `delayMs` (400 ms) between them, as "Download all" does. A `source` is a URL or a `Blob`. It stops when `signal` aborts.
 
+## Markdown
+
+`AgentRunForm` and `AgentChat` show the agent's replies, and the user's messages, with `MarkdownContent`. It's exported for your own UI too:
+
+```tsx
+import { MarkdownContent } from "@seclai/react";
+
+<MarkdownContent content={run.text} streaming={run.status === "running"} />
+```
+
+| Prop | |
+|---|---|
+| `content` | Required. The Markdown |
+| `streaming` | The text is still arriving. See [Streaming](#streaming) |
+| `extensions` | Extensions such as `math()`, in place of the ones from `SeclaiMarkdownProvider` |
+
+It renders [GitHub Flavored Markdown](https://github.github.com/gfm/):
+
+- paragraphs, headings, **bold**, *emphasis*, ~~strikethrough~~, block quotes and rules;
+- links, and bare URLs and emails, which become links;
+- inline code and code blocks, fenced or indented, in a monospace font. Code blocks scroll sideways rather than wrap;
+- lists, nested by indenting an item to the text of the item above, with paragraphs and code blocks inside items;
+- tables, which scroll sideways when they're too wide;
+- task lists (`- [ ]`, `- [x]`), as disabled checkboxes, and footnotes.
+
+Agent replies get a few extras:
+
+- **Numbered items keep the number the agent wrote.** Markdown only keeps a list's first number and counts on from it, so `1. 1. 1.` would read 1, 2, 3. Each number shows in a badge like `MediaPreview`'s, so "2." in the text matches image 2. The list is still an `<ol>` with `start` and `value` set.
+- **A single newline is a line break**, as in chat apps, rather than a space. `<br>` is one too, as agents write it in table cells.
+- **`•` works as a bullet**, as well as `-`, `*` and `+`.
+
+Maths, Mermaid diagrams and HTML are opt-in: see [Extensions](#extensions).
+
+### Streaming
+
+`MarkdownContent` re-renders on every token. To stay fast on long replies, it splits the text into top-level blocks, such as paragraphs, lists, tables and code blocks, and only parses the last one again: about 2 ms per token on a 50 KB reply, where parsing the whole reply takes over 100 ms. Blocks are split where the parser ended one, so a list with blank lines between its items, or a code block holding a blank line, stays whole. A reply with a link reference definition (`[docs]: https://…`) or a footnote is parsed whole, as those change text elsewhere in it.
+
+Partial text renders as what it is so far, without errors or garbage:
+
+- An unclosed code fence is a code block to the end.
+- A table's header row is text until its delimiter row arrives.
+- An unclosed `**`, `` ` `` or `[link](` is text until it closes.
+- Maths and diagrams render once they're complete: see [Extensions](#extensions).
+
+With `streaming` set (`AgentRunForm` and `AgentChat` set it while a reply streams), an unfinished last line that could still turn into something else is held back until more of it arrives: a bare list marker (`-`, `2.`), the start of a rule or heading underline (`-`, `--`, `* *`), a fence (```` ``` ````, `$$`), a table's delimiter row (`| --- |`) or a bare `#`. Shown as they are, these would flash as an empty list item, or turn the line above into a heading, for a token or two.
+
+### Extensions
+
+HTML, maths and Mermaid diagrams are extensions, each in an entry of its own, so an app that doesn't use one doesn't bundle it. Pass them to every `MarkdownContent` at once, including the ones `AgentRunForm` and `AgentChat` render, with `SeclaiMarkdownProvider`:
+
+```tsx
+import { AgentChat, SeclaiMarkdownProvider } from "@seclai/react";
+import { html } from "@seclai/react/html";
+import { math } from "@seclai/react/math";
+import { mermaid } from "@seclai/react/mermaid";
+import "katex/dist/katex.min.css"; // for math()
+
+const extensions = [html(), math(), mermaid()];
+
+export function App() {
+  return (
+    <SeclaiMarkdownProvider extensions={extensions}>
+      <AgentChat />
+    </SeclaiMarkdownProvider>
+  );
+}
+```
+
+Or pass them to one `MarkdownContent` with its `extensions` prop, which replaces the provider's. Each factory returns the same extension every time, so calling them inline is fine.
+
+| Extension | Install | Renders |
+|---|---|---|
+| `html()` from `@seclai/react/html` | Nothing more | HTML in the Markdown, such as `<sub>`, `<kbd>`, `<details>` and inline `<svg>` charts, sanitized (see [Security](#security)). Without it, HTML shows as the text it is. It bundles an HTML parser, about 50 KB gzipped |
+| `math()` from `@seclai/react/math` | `katex` and `remark-math` | `$…$` and `\(…\)` inline, `$$…$$` and `\[…\]` as a block, and ```` ```math ```` fences, with [KaTeX](https://katex.org). Import KaTeX's stylesheet, `katex/dist/katex.min.css`, once in your app: without it the maths shows twice, as text and as MathML |
+| `mermaid()` from `@seclai/react/mermaid` | `mermaid` | ```` ```mermaid ```` code blocks as [Mermaid](https://mermaid.js.org) diagrams. Mermaid is loaded on demand the first time a diagram shows, so bundlers split it into chunks of its own |
+
+**Before turning on `html()`:** with it, angle brackets in prose are read as HTML tags, and a tag that isn't on the allowlist is removed. Agents write such text all the time outside backticks, and the reader sees words go missing with no sign of why:
+
+| The agent writes | Shows with `html()` |
+|---|---|
+| `Return a List<String> of names` | Return a List of names |
+| `Pass the <filename> argument` | Pass the  argument |
+| `If a<b and c>d then swap.` | If a**d then swap.** (read as a `<b>` tag) |
+
+Text in backticks, such as `` `List<String>` ``, is safe. So turn `html()` on only for agents that are meant to produce HTML or SVG, and prompt them to put code, types and placeholders in backticks. A tag left open also makes the rest of the reply re-parse whole on every streamed token, which slows long replies down.
+
+`katex`, `remark-math` and `mermaid` are optional peer dependencies: install them only for the extensions you use.
+
+```sh
+npm install katex remark-math   # for math()
+npm install mermaid             # for mermaid()
+```
+
+How they handle partial and invalid input:
+
+- **Maths** renders once its closing delimiter arrives. Until then, `$…` is text, and a `$$` block or ```` ```math ```` fence shows its source as a code block. Invalid LaTeX shows as its source in code, not as a KaTeX error. `\(…\)` and `\[…\]` are rewritten to `$…$` and `$$…$$` before parsing, except in code. As in most Markdown maths, `$5 and $10` on one line is read as maths.
+- **A Mermaid diagram** is drawn once its closing fence arrives. Until then, while Mermaid loads, and if the diagram has a syntax error, its source shows as a code block. `mermaid({ theme: "dark" })` picks Mermaid's theme (`"default"`, on a white background, unless set). Mermaid has one configuration per page, so the first theme used applies to every diagram.
+
+To write your own, a `MarkdownExtension` is an object with any of `remarkPlugins`, `rehypePluginsBeforeSanitize`, `rehypePlugins`, `components` and `transform`. `rehypePlugins` run after sanitizing, so they must only add HTML they built. `components` replace the built-in ones, as in [react-markdown](https://github.com/remarkjs/react-markdown#components). Create an extension once, outside your components, rather than on every render: a new object is a new set of plugins, which renders every block again. For example, to show images inline rather than as links (see [Security](#security)):
+
+```tsx
+const images: MarkdownExtension = {
+  components: { img: ({ node: _, ...props }) => <img {...props} loading="lazy" /> },
+};
+```
+
+### Security
+
+Agent output is untrusted: a reply can be steered by whatever the agent read. So:
+
+- **Links** keep only `http:`, `https:` and `mailto:` URLs, and relative ones (`/path`, `#id`). Anything else, such as `javascript:` or `data:`, is removed, and the link shows as its text. `http:` and `https:` links open in a new tab with `rel="noopener noreferrer"`.
+- **Images show as links** to the image (with its alt text, or else its URL), rather than loading. A reply could otherwise use an image URL to send data from the conversation to another server, or to track that it was viewed. An image inside a link shows as its alt text. To show images anyway, replace the `img` component with an extension, as above; the URL rules still apply, so only `http:`, `https:` and relative image URLs load.
+- **HTML shows as text** unless `html()` is on. With it, HTML is sanitized to an allowlist: [GitHub's](https://github.com/syntax-tree/hast-util-sanitize#defaultschema), plus SVG shapes, text, gradients, markers, masks and filters. `<script>`, `<style>`, `<iframe>`, `<foreignObject>`, `<template>` and `<noscript>` are removed with their content; other elements not on the list, such as `<form>` or `<object>`, are removed but keep their text. `on*` event handlers, `style`, `class`, `accesskey` and `tabindex` attributes are removed. Every `id` is prefixed with `user-content-`, so a reply can't clobber the app's own ids, and in-page links (`#id`) follow the prefix. In SVG, `href` and `url(…)` can only point at an id in the same reply.
+- **KaTeX** runs with `trust: false`, so `\href`, `\url`, `\includegraphics` and the `\html…` commands don't produce links, images or attributes.
+- **Mermaid** runs with `securityLevel: "strict"` and `startOnLoad: false`, and syntax errors show the source rather than Mermaid's error diagram. Labels can't hold images or `style` attributes, and a diagram's `%%{init: …}%%` directive can't set `themeCSS`, `fontFamily`, `altFontFamily` or the label sanitizing, which Mermaid copies into the diagram as they are, so a diagram can't load outside URLs or restyle the page.
+
+### Styling Markdown
+
+The stylesheet styles Markdown with the same `--seclai-*` variables, in light and dark colour schemes. The root is a `div.seclai-markdown`, and its elements are plain HTML (`p`, `h1` to `h6`, `pre > code`, `table`, `blockquote` and so on), so `.seclai-markdown h2` and the like work for your own styles. It also uses:
+
+| Class | |
+|---|---|
+| `.seclai-markdown-number` | A numbered item's badge, the first child of its `li`. The item's content is in a `div` after it |
+| `.seclai-markdown-table` | The scrolling wrapper around a table |
+| `.seclai-markdown-image` | The link an image shows as |
+| `.seclai-markdown-math` | KaTeX's output: a `span` inline, a `div` for a block |
+| `.seclai-markdown-mermaid` | A drawn diagram, with `data-theme` set to its Mermaid theme |
+| `.task-list-item`, `.contains-task-list` | A task list's items, and the list |
+| `section.footnotes` | The footnotes, at the end |
+
+Two more variables: `--seclai-code-font` (the monospace font for code) and `--seclai-code-surface` (the background of code blocks and inline code).
+
 ## Placeholders
 
-These are exported so the API is in place, but they're minimal until they're ported from the main Seclai app:
-
-| Export | For now | Coming |
-|---|---|---|
-| `MarkdownContent` | Paragraphs, lists, rules and bold (see below) | GFM tables, KaTeX, mermaid, sanitized SVG |
-| `MediaPreview` | Image cards (see [Media](#media)), a download link for everything else | Audio, video and PDF previews |
-
-`MarkdownContent` shows the agent's text in `AgentRunForm` and `AgentChat`. It renders:
-
-- paragraphs, split by blank lines, with a single newline as a line break;
-- numbered lists (`1.` or `1)`), keeping the agent's own numbers. Each number is a badge like the one on `MediaPreview`, so "2." in the text matches image 2;
-- bulleted lists (`-`, `*` or `•`);
-- nested lists: an item indented at least 2 spaces more than the item above it (a tab counts as 4) is nested in that item, numbered or bulleted, at any depth;
-- horizontal rules: a line of three or more `-`, `*` or `_`, optionally spaced (`---`, `* * *`);
-- `**bold**`.
-
-Anything else, such as headings, links, code and tables, shows as the text it is. It never renders HTML. While the text streams in, a list item with nothing after its marker, a rule that's only partly there, or a `**` that isn't closed yet, shows as plain text until it's complete. The root element is a `div.seclai-markdown`, and the list numbers are `.seclai-markdown-number`.
+`MediaPreview` is exported so the API is in place, but it's minimal until it's ported from the main Seclai app: it shows image cards (see [Media](#media)) and a download link for everything else. Audio, video and PDF previews are still to come.
 
 ## License
 

@@ -60,5 +60,11 @@ export {
   type SaveFilesOptions,
 } from "./media/files";
 
-// Placeholders, to be ported from the main Seclai app. See each file.
-export { MarkdownContent, type MarkdownContentProps } from "./placeholders/MarkdownContent";
+// Markdown. HTML, maths and Mermaid diagrams are opt-in: see `@seclai/react/html`,
+// `@seclai/react/math` and `@seclai/react/mermaid`.
+export { MarkdownContent, type MarkdownContentProps } from "./markdown/MarkdownContent";
+export {
+  SeclaiMarkdownProvider,
+  type MarkdownExtension,
+  type SeclaiMarkdownProviderProps,
+} from "./markdown/extensions";
