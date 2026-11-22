@@ -222,7 +222,10 @@ function timeWhole(content: string, chunk: number, count: number) {
 }
 
 describe("MarkdownContent performance", () => {
-  it("renders each token of a 50 KB reply quickly", () => {
+  // Streams the whole reply (about 1,250 renders) and times whole-text parses for
+  // comparison, which together take several seconds on CI: the limit that matters
+  // is per token, below, not the default 5-second test timeout.
+  it("renders each token of a 50 KB reply quickly", { timeout: 60_000 }, () => {
     const content = longReply();
     expect(content.length).toBeGreaterThanOrEqual(50_000);
     // Stream it all in 40-character chunks, and time the renders over its last 10 KB.
