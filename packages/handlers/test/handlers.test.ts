@@ -1298,6 +1298,206 @@ describe("run callbacks", () => {
       expect(log).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("when the API refuses the run up front", () => {
+    const OUT_OF_CREDITS = JSON.stringify({ error: { code: "x", message: "Out of credits" } });
+
+    function refuse(err: unknown = statusError(402, OUT_OF_CREDITS)) {
+      client.runStreamingAgent.mockImplementation(async function* () {
+        throw err;
+      });
+    }
+
+    it("calls onRunEnd once with a failed outcome carrying the browser's error, and keeps the response", async () => {
+      refuse();
+      const onRunEnd = vi.fn();
+      const onEvent = vi.fn();
+      const req = runRequest({ input: "hi", sessionId: "s1" });
+
+      const res = await withCallbacks({ onEvent, onRunEnd }).run(req);
+
+      expect(res.status).toBe(402);
+      expect(res.headers.get("content-type")).toBe("application/json");
+      expect(await res.json()).toEqual({ error: "Out of credits", status: 402 });
+      expect(onRunEnd).toHaveBeenCalledTimes(1);
+      expect(onRunEnd).toHaveBeenCalledWith(
+        { runId: null, status: "failed", output: "", attachments: [], error: "Out of credits" },
+        { body: { input: "hi", sessionId: "s1" }, request: req, context: undefined },
+      );
+      expect(onEvent).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a hidden credentials error", statusError(401), "The Seclai API rejected the server's credentials. Check SECLAI_API_KEY."],
+      ["an unreachable API", new Error("secret-key exploded"), "Could not reach the Seclai API."],
+      [
+        "a timeout before the first event",
+        new SeclaiStreamingError("Timed out"),
+        "Timed out waiting for the Seclai API. The run may still finish on Seclai.",
+      ],
+    ])("reports the browser's message, not the cause, for %s", async (_label, err, message) => {
+      refuse(err);
+      const outcomes: RunOutcome[] = [];
+
+      const res = await withCallbacks({ onRunEnd: (o) => void outcomes.push(o) }).run(runRequest({ input: "hi" }));
+
+      expect((await res.json()).error).toBe(message);
+      expect(outcomes).toEqual([{ runId: null, status: "failed", output: "", attachments: [], error: message }]);
+    });
+
+    it("passes the app's context", async () => {
+      refuse();
+      const onRunEnd = vi.fn();
+      await createSeclaiHandlers({
+        apiKey: "k",
+        agentId: AGENT,
+        context: () => ({ userId: "u1" }),
+        onRunEnd,
+      }).run(runRequest({ input: "hi" }));
+
+      expect(onRunEnd.mock.calls[0]![1].context).toEqual({ userId: "u1" });
+    });
+
+    it("returns the response only once onRunEnd has resolved", async () => {
+      refuse();
+      const gate = deferred();
+      const pending = withCallbacks({ onRunEnd: () => gate.promise }).run(runRequest({ input: "hi" }));
+
+      expect(await settles(pending)).toBe(false);
+      gate.resolve();
+      expect((await pending).status).toBe(402);
+    });
+
+    it.each([
+      ["throws", () => {
+        throw new Error("write failed");
+      }],
+      ["rejects", async () => {
+        throw new Error("write failed");
+      }],
+    ])("still returns the original error when onRunEnd %s, and logs the throw", async (_label, onRunEnd) => {
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      refuse();
+
+      const res = await withCallbacks({ onRunEnd }).run(runRequest({ input: "hi" }));
+
+      expect(res.status).toBe(402);
+      expect(await res.json()).toEqual({ error: "Out of credits", status: 402 });
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(expect.any(String), new Error("write failed"));
+    });
+
+    it("sends an onRunEnd throw to the logger when there is one", async () => {
+      refuse();
+      const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+      const res = await createSeclaiHandlers({
+        apiKey: "k",
+        agentId: AGENT,
+        logger,
+        onRunEnd: () => {
+          throw new Error("write failed");
+        },
+      }).run(runRequest({ input: "hi" }));
+
+      expect(res.status).toBe(402);
+      expect(logger.error.mock.calls.map(([m]) => m)).toEqual([
+        "an onEvent or onRunEnd callback threw",
+        "run rejected",
+      ]);
+    });
+
+    it("isn't called when authorizeRun refuses the run", async () => {
+      const onRunEnd = vi.fn();
+      const res = await createSeclaiHandlers({
+        apiKey: "k",
+        agentId: AGENT,
+        authorizeRun: () => false,
+        onRunEnd,
+      }).run(runRequest({ input: "hi" }));
+
+      expect(res.status).toBe(403);
+      expect(onRunEnd).not.toHaveBeenCalled();
+    });
+
+    it("isn't called when context refuses the run, or the body isn't valid", async () => {
+      const onRunEnd = vi.fn();
+      const seclai = createSeclaiHandlers({
+        apiKey: "k",
+        agentId: AGENT,
+        context: () => {
+          throw deny(401, "Sign in.");
+        },
+        onRunEnd,
+      });
+
+      expect((await seclai.run(runRequest({ input: "hi" }))).status).toBe(401);
+      expect((await seclai.run(runRequest({}))).status).toBe(400);
+      expect(onRunEnd).not.toHaveBeenCalled();
+    });
+
+    /** An upstream that the browser leaves while it is connecting. */
+    function leaveWhileConnecting(browser: AbortController, err: unknown = new Error("aborted")) {
+      client.runStreamingAgent.mockImplementation(async function* () {
+        browser.abort();
+        throw err;
+      });
+    }
+
+    it("reports cancelled when the browser left while the stream was connecting", async () => {
+      const browser = new AbortController();
+      leaveWhileConnecting(browser);
+      const outcomes: RunOutcome[] = [];
+
+      const res = await withCallbacks({ onRunEnd: (o) => void outcomes.push(o) }).run(
+        runRequest({ input: "hi" }, { signal: browser.signal }),
+      );
+
+      expect(client.runStreamingAgent.mock.calls[0]![2].signal.aborted).toBe(true);
+      expect(res.status).toBe(502);
+      expect(outcomes).toEqual([{ runId: null, status: "cancelled", output: "", attachments: [], error: null }]);
+    });
+
+    it("cancels the run before it's sent when the browser left while authorizeRun ran", async () => {
+      const browser = new AbortController();
+      // As fetch does with an aborted signal: fails without sending anything.
+      client.runStreamingAgent.mockImplementation(async function* (_agent: string, _body: unknown, opts: { signal: AbortSignal }) {
+        if (opts.signal.aborted) throw new DOMException("aborted", "AbortError");
+        yield { event: "init", data: { run_id: RUN } };
+      });
+      const outcomes: RunOutcome[] = [];
+
+      await createSeclaiHandlers({
+        apiKey: "k",
+        agentId: AGENT,
+        // The browser leaves while the app is still deciding, before the
+        // handler starts listening for it to leave.
+        authorizeRun: () => void browser.abort(),
+        onRunEnd: (o) => void outcomes.push(o),
+      }).run(runRequest({ input: "hi" }, { signal: browser.signal }));
+
+      expect(client.runStreamingAgent.mock.calls[0]![2].signal.aborted).toBe(true);
+      expect(outcomes).toEqual([{ runId: null, status: "cancelled", output: "", attachments: [], error: null }]);
+    });
+
+    it("with keepReadingAfterDisconnect, reports the refusal as failed even if the browser left", async () => {
+      const browser = new AbortController();
+      leaveWhileConnecting(browser, statusError(402, OUT_OF_CREDITS));
+      const outcomes: RunOutcome[] = [];
+
+      await createSeclaiHandlers({
+        apiKey: "k",
+        agentId: AGENT,
+        keepReadingAfterDisconnect: true,
+        onRunEnd: (o) => void outcomes.push(o),
+      }).run(runRequest({ input: "hi" }, { signal: browser.signal }));
+
+      expect(client.runStreamingAgent.mock.calls[0]![2].signal.aborted).toBe(false);
+      expect(outcomes).toEqual([
+        { runId: null, status: "failed", output: "", attachments: [], error: "Out of credits" },
+      ]);
+    });
+  });
 });
 
 describe("keepReadingAfterDisconnect", () => {

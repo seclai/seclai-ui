@@ -5,9 +5,14 @@ import {
   type AgentAttachmentRefsApiResponse,
   type ApiVersion,
 } from "@seclai/sdk";
-import { errorLogFields, json, jsonError, toErrorResponse } from "./errors";
+import { errorLogFields, json, jsonError, runErrorBody, toErrorResponse } from "./errors";
 import { safeLogger, type SeclaiLogger } from "./logger";
-import { createRunObserver, type RunEndCallback, type RunEventCallback } from "./run-callbacks";
+import {
+  createRunObserver,
+  reportRefusedRun,
+  type RunEndCallback,
+  type RunEventCallback,
+} from "./run-callbacks";
 import { startRunLog } from "./run-log";
 import { relayRunEvents, SSE_HEADERS } from "./sse";
 
@@ -155,10 +160,17 @@ export interface SeclaiHandlersOptions<Ctx = undefined> {
    */
   onEvent?: RunEventCallback<Ctx>;
   /**
-   * Called exactly once for each run that started streaming, with how it ended.
-   * Awaited before the final `done`, `error` or `timeout` event is relayed, so
-   * whatever it stores is in place when the browser sees the run end. If it
-   * throws, the browser gets an `error` event instead.
+   * Called exactly once for each run, with how it ended. Awaited before the
+   * final `done`, `error` or `timeout` event is relayed, so whatever it stores
+   * is in place when the browser sees the run end. If it throws, the browser
+   * gets an `error` event instead.
+   *
+   * Also called, with `status: "failed"`, when the API refuses the run before
+   * it streams, or it fails before its first event (the API can't be reached,
+   * or `runTimeoutMs` runs out), and awaited before the error response is
+   * returned. The status is `cancelled` instead if the browser left while the
+   * stream was connecting. A throw there is only logged. Not called when
+   * `authorizeRun`, `context` or the body check refuses the run.
    */
   onRunEnd?: RunEndCallback<Ctx>;
   /**
@@ -715,8 +727,13 @@ export function createSeclaiHandlers<Ctx>(
         const abort = () => upstream.abort();
         const keepReading = keepReadingAfterDisconnect && !!(onEvent || onRunEnd);
         // Kept reading, the run isn't tied to the browser's request: the relay
-        // reads it to the end instead when the browser goes away.
-        if (!keepReading) req.signal?.addEventListener("abort", abort, { once: true });
+        // reads it to the end instead when the browser goes away. A browser
+        // that already left, while `authorizeRun` or `context` ran, fires no
+        // event, so the run is cancelled before it's sent.
+        if (!keepReading) {
+          if (req.signal?.aborted) abort();
+          else req.signal?.addEventListener("abort", abort, { once: true });
+        }
 
         const log =
           logger &&
@@ -764,11 +781,22 @@ export function createSeclaiHandlers<Ctx>(
             { headers: SSE_HEADERS },
           );
         } catch (err) {
-          const res = toErrorResponse(err);
-          // The browser left while the stream was connecting, which aborted it.
-          if (!keepReading && req.signal?.aborted) log?.disconnected();
-          else log?.rejected(err, res.status);
-          return res;
+          const error = runErrorBody(err);
+          // The browser left before or while the stream was connecting, which
+          // aborted it. Checked on the upstream, not the request: with
+          // `keepReadingAfterDisconnect` it isn't aborted, so whatever the API
+          // answered is the real outcome.
+          const browserLeft = upstream.signal.aborted;
+          // Awaited, so whatever it stores is in place when the browser sees
+          // the error. It never throws.
+          await reportRefusedRun(
+            { onRunEnd, log },
+            { body, request: req, context: runContext as Ctx },
+            browserLeft ? { cancelled: true } : { error: error.error },
+          );
+          if (browserLeft) log?.disconnected();
+          else log?.rejected(err, error.status);
+          return json(error, error.status);
         }
       },
 

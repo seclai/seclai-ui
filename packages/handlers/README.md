@@ -204,7 +204,7 @@ const seclai = createSeclaiHandlers({
 
 **`onEvent(event, ctx)`** gets each event as `{ event, data }`, with `data` parsed from JSON, in order. Each call is awaited before its event is relayed. It also sees the `error` event the handler sends when the upstream connection fails. The one event it can miss is a first event the browser never received because it disconnected straight away; that event still counts toward the outcome.
 
-**`onRunEnd(outcome, ctx)`** is called exactly once for each run that started streaming. It is awaited before the final `done`, `error` or `timeout` event is relayed, so **whatever it stores is in place by the time the browser sees `done`**, and the browser can reload history right away. For `done`, `onEvent` runs first, then `onRunEnd`, then the event is relayed.
+**`onRunEnd(outcome, ctx)`** is called exactly once for each run, including one the API refuses before it streams (see below). For a run that streams, it is awaited before the final `done`, `error` or `timeout` event is relayed, so **whatever it stores is in place by the time the browser sees `done`**, and the browser can reload history right away. For `done`, `onEvent` runs first, then `onRunEnd`, then the event is relayed.
 
 | `outcome` field | |
 |---|---|
@@ -221,8 +221,11 @@ const seclai = createSeclaiHandlers({
 | Sends `timeout`: the API stopped streaming before the run ended | `failed` | `Stopped waiting for the run. It may still finish on Seclai.` |
 | Ends with none of these | `failed` | `The stream ended without a result.` |
 | Is cancelled by the browser | `cancelled`, unless `keepReadingAfterDisconnect` is on | `null` |
+| Is refused by the API before it streams, for example for no credits or a file the agent doesn't accept, or fails before its first event because the API can't be reached or `runTimeoutMs` runs out | `failed` | The `error` the browser gets in the error response |
 
 `cancelled` means the browser left. The run itself keeps going on Seclai. If the upstream connection fails or ends after the browser has left, that is reported as `cancelled` too, but an `error` or `timeout` event from the API is still `failed`. If the browser leaves while a callback is handling `done`, `error` or `timeout`, that event's outcome is reported.
+
+When the API refuses a run up front, or the run fails before its first event, `onRunEnd` is awaited before the handler returns the error response, so what it stores is in place by the time the browser sees the error. The outcome has `runId: null`, empty `output` and no `attachments`, and `onEvent` isn't called. After a timeout, the run may still have started and may still finish on Seclai, so the error says so: `Timed out waiting for the Seclai API. The run may still finish on Seclai.` If the browser left while the stream was connecting, the outcome is `cancelled` instead, with `error: null`, unless `keepReadingAfterDisconnect` is on. That includes a browser that left while `authorizeRun` or `context` ran: the run is then cancelled before it's sent to Seclai. If `onRunEnd` throws or rejects here, the error is logged like any other callback error (see below), and the browser still gets the original error response. A refusal from `authorizeRun`, `context` or the body check is your app's own decision, before the run is sent to the API, and doesn't call `onRunEnd`.
 
 When `runTimeoutMs` runs out, the stream gets an `error` event, `Timed out waiting for the agent run to finish.`, not `timeout`. The time spent awaiting your callbacks counts against `runTimeoutMs`.
 

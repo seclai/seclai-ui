@@ -44,46 +44,70 @@ function upstreamMessage(responseText: string | undefined): string | undefined {
   return undefined;
 }
 
+/** The JSON body of an error response: what the browser gets. */
+export interface ErrorBody {
+  error: string;
+  status: number;
+  details?: unknown;
+}
+
 /**
- * Turn anything thrown while calling the SDK into a response for the browser.
+ * Turn anything thrown while calling the SDK into an error body for the browser.
  *
  * Upstream 4xx responses describe the browser's request (a file the agent does
  * not accept, no credits left), so they pass through. A 401/403 means the
  * server's API key is wrong and a 5xx is Seclai's fault. Neither is something
  * the browser can fix, so both are reported as a bad gateway.
  */
-export function toErrorResponse(err: unknown): Response {
+export function toErrorBody(err: unknown): ErrorBody {
   if (err instanceof SeclaiAPIValidationError) {
-    return json(
-      {
-        error: "The Seclai API rejected this request as invalid.",
-        status: 422,
-        details: err.validationError,
-      },
-      422,
-    );
+    return {
+      error: "The Seclai API rejected this request as invalid.",
+      status: 422,
+      details: err.validationError,
+    };
   }
   if (err instanceof SeclaiAPIStatusError) {
     const { statusCode } = err;
     if (statusCode === 401 || statusCode === 403) {
-      return jsonError(
-        502,
-        "The Seclai API rejected the server's credentials. Check SECLAI_API_KEY.",
-      );
+      return {
+        error: "The Seclai API rejected the server's credentials. Check SECLAI_API_KEY.",
+        status: 502,
+      };
     }
     if (statusCode >= 400 && statusCode < 500) {
-      return jsonError(
-        statusCode,
-        upstreamMessage(err.responseText) ??
+      return {
+        error:
+          upstreamMessage(err.responseText) ??
           `The Seclai API returned status ${statusCode}.`,
-      );
+        status: statusCode,
+      };
     }
-    return jsonError(502, `The Seclai API returned status ${statusCode}.`);
+    return { error: `The Seclai API returned status ${statusCode}.`, status: 502 };
   }
   if (err instanceof SeclaiStreamingError) {
-    return jsonError(504, "Timed out waiting for the Seclai API.");
+    return { error: "Timed out waiting for the Seclai API.", status: 504 };
   }
-  return jsonError(502, "Could not reach the Seclai API.");
+  return { error: "Could not reach the Seclai API.", status: 502 };
+}
+
+/**
+ * {@link toErrorBody} for a run that failed before its first event. A timeout
+ * there may come after the API accepted the run, so the message says it may
+ * still finish, as the stream's own `timeout` does.
+ */
+export function runErrorBody(err: unknown): ErrorBody {
+  const body = toErrorBody(err);
+  if (err instanceof SeclaiStreamingError) {
+    body.error = "Timed out waiting for the Seclai API. The run may still finish on Seclai.";
+  }
+  return body;
+}
+
+/** Turn anything thrown while calling the SDK into a response for the browser. See {@link toErrorBody}. */
+export function toErrorResponse(err: unknown): Response {
+  const body = toErrorBody(err);
+  return json(body, body.status);
 }
 
 /** Message for an `event: error` frame sent after the stream has started. */

@@ -94,6 +94,37 @@ function toAttachments(raw: unknown): RunOutcomeAttachment[] {
   );
 }
 
+/** Report a throw from `onEvent` or `onRunEnd`: to the run's log, or to `console` without one. */
+function reportCallbackError(log: RunLog | undefined, err: unknown) {
+  if (log) log.callbackError(err);
+  else console.error("@seclai/handlers: an onEvent or onRunEnd callback threw.", err);
+}
+
+/**
+ * Tell `onRunEnd` about a run that ended before it streamed: the API refused
+ * it, or couldn't be reached. `error` is the message the browser gets.
+ * `cancelled` means the browser left while the stream was connecting, which
+ * aborted it. A throw from `onRunEnd` is reported as other callback errors
+ * are, and never rejects, so the browser still gets the original error.
+ */
+export async function reportRefusedRun<Ctx>(
+  callbacks: { onRunEnd?: RunEndCallback<Ctx>; log?: RunLog },
+  ctx: RunCallbackContext<Ctx>,
+  how: { cancelled: true } | { error: string },
+): Promise<void> {
+  const { onRunEnd, log } = callbacks;
+  if (!onRunEnd) return;
+  const outcome: RunOutcome =
+    "error" in how
+      ? { runId: null, status: "failed", output: "", attachments: [], error: how.error }
+      : { runId: null, status: "cancelled", output: "", attachments: [], error: null };
+  try {
+    await onRunEnd(outcome, ctx);
+  } catch (err) {
+    reportCallbackError(log, err);
+  }
+}
+
 /**
  * Turn the `onEvent` and `onRunEnd` options, and the run's log, into an
  * observer for `relayRunEvents`. `onRunEnd` gets exactly one outcome: on
@@ -239,8 +270,7 @@ export function createRunObserver<Ctx>(
     onError(err) {
       // The browser only sees a generic error, so this is the one place the
       // cause shows up.
-      if (log) log.callbackError(err);
-      else console.error("@seclai/handlers: an onEvent or onRunEnd callback threw.", err);
+      reportCallbackError(log, err);
     },
 
     onKeepalive: log && (() => log.keepalive()),
