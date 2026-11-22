@@ -253,28 +253,40 @@ import { MediaGallery, MediaPreview, MediaSkeleton, MediaViewer } from "@seclai/
 />
 ```
 
-- **`MediaPreview`** shows one attachment. An image gets a card: a fixed-ratio frame so the layout doesn't jump while it loads, an optional number badge and a download link. Files that aren't images are a download link.
-- **`MediaGallery`** lays out a run's images as numbered cards that open a full-size viewer, with "Download all" when there's more than one. It downloads the files one at a time, because browsers block a burst of simultaneous downloads. Other files follow the images as download links.
+- **`MediaPreview`** shows one attachment as a card, chosen by its mime type (ignoring case and parameters such as `; codecs=…`). Every card has a download link, an optional number badge and an `actions` slot:
+  - **Images** (`image/*`, SVG included) sit in a fixed-ratio frame, so the layout doesn't jump while they load.
+  - **Audio** (`audio/*`) plays in the browser's own `<audio controls>`, under the file's name.
+  - **Video** (`video/*`) plays in the browser's own `<video controls playsinline>`, in a frame like an image's.
+  - **PDFs** (`application/pdf`) show in the browser's PDF viewer, in an `<object>`. Browsers without one, including most mobile browsers, show a download link in its place.
+  - **Anything else**, HTML included, is a download link.
+
+  Audio and video load only their metadata until played (`preload="metadata"`). A file that fails to load says so in its card, and keeps its download link.
+- **`MediaGallery`** lays out a run's images, audio, video and PDFs as cards, numbered in the attachments' order so the numbers match the agent's numbered list. Images open a full-size viewer. "Download all" saves every card's file when there's more than one, one at a time, because browsers block a burst of simultaneous downloads. Other files follow the cards as download links.
 - **`MediaSkeleton`** is a placeholder card for an image that's still being generated. It pulses, unless the user prefers reduced motion.
-- **`MediaViewer`** is the gallery's full-size viewer, a modal `<dialog>` with previous and next (also on the arrow keys) and a download button. Escape, the close button or a click on the backdrop closes it, and focus goes back to where it was. It's controlled: pass the `index` to show, or `null` when closed.
-- **`attachmentFileName(attachment, number?)`** is the filename the components save a file as: its own name, or else `image-<number>` (or its id) with an extension from the mime type, such as `image-2.png`.
+- **`MediaViewer`** is the gallery's full-size image viewer, a modal `<dialog>` with previous and next (also on the arrow keys) and a download button. Escape, the close button or a click on the backdrop closes it, and focus goes back to where it was. It's controlled: pass the `index` to show, or `null` when closed. Pass `numbers` to name each image by its card number rather than its position. Video and PDFs don't open in it: video has its own full-screen control, and a PDF its browser viewer.
+- **`attachmentFileName(attachment, number?)`** is the filename the components save a file as: its own name, or else its kind and number (`image-2.png`, `audio-3.mp3`, `video-1.mp4`, `pdf-4.pdf`, `file-5.zip`), or its id without a number, with an extension from the mime type.
 
 | `MediaPreview` prop | |
 |---|---|
 | `attachment` | Required. The file to show |
-| `aspectRatio` | The frame's ratio, as a number (`16 / 9`) or a string (`"16 / 9"`). Without it the frame takes the image's own ratio once it loads, and `--seclai-media-aspect-ratio` (square) until then |
-| `number` | A badge on the image, matching the agent's numbered list. Also names an unnamed download `image-<number>` |
+| `aspectRatio` | An image or video frame's ratio, as a number (`16 / 9`) or a string (`"16 / 9"`). Without it the frame takes the file's own ratio once it loads, and `--seclai-media-aspect-ratio` (square) until then. Audio and PDF cards don't use it |
+| `number` | A badge on the card, matching the agent's numbered list. Also names an unnamed file, such as `image-<number>` or `audio-<number>`, for download and for screen readers ("Audio 2") |
 | `actions` | App-specific buttons after the download link: a node, or a function of the attachment |
-| `onOpen` | Makes the image a button, for opening a viewer |
+| `onOpen` | Makes an image a button, for opening a viewer. Other files ignore it |
 
 | `MediaGallery` prop | |
 |---|---|
 | `attachments` | Required. A run's attachments |
-| `aspectRatio` | Every card's ratio. Without it each card takes its image's own ratio |
-| `pending` | How many skeleton cards to show after the images, numbered on from them |
-| `actions` | `(attachment, number) => ReactNode`, for each image card |
+| `aspectRatio` | Every image and video card's ratio. Without it each takes its file's own ratio |
+| `pending` | How many skeleton cards to show after the cards, numbered on from them |
+| `actions` | `(attachment, number) => ReactNode`, for each card |
 
-The stylesheet adds these variables for media: `--seclai-media-aspect-ratio` (a frame's ratio before its image loads, `1 / 1`), `--seclai-media-fit` (`object-fit` in the frame, `scale-down`, so small images keep their natural size), `--seclai-media-min-width` (a gallery column's minimum width, `220px`) and `--seclai-media-max-width` (a card's width outside a gallery, `480px`). The viewer is dark in both colour schemes.
+The stylesheet adds these variables for media: `--seclai-media-aspect-ratio` (a frame's ratio before its image or video loads, `1 / 1`), `--seclai-media-fit` (`object-fit` in the frame, `scale-down`, so small images keep their natural size), `--seclai-media-min-width` (a gallery column's minimum width, `220px`), `--seclai-media-max-width` (a card's width outside a gallery, `480px`) and `--seclai-media-pdf-aspect-ratio` (a PDF's frame, `3 / 4`). Each kind of card has a class: `.seclai-media-image`, `.seclai-media-audio`, `.seclai-media-video` and `.seclai-media-pdf`, all with `.seclai-media-card`. The viewer is dark in both colour schemes.
+
+### Audio, video and PDFs
+
+- **Seeking doesn't work yet, and Safari may not play video.** The previews stream through the `download` handler, and the Seclai API doesn't answer HTTP `Range` requests for run attachments yet ([seclai/seclai#2556](https://github.com/seclai/seclai/issues/2556)), nor can `@seclai/sdk` send them ([seclai/seclai-javascript#21](https://github.com/seclai/seclai-javascript/issues/21)). So audio and video play from the start but can't skip ahead, and Safari, which wants `206 Partial Content` for video, may refuse to play it at all. The download link still works. The handler will forward `Range` once both land.
+- **Your Content Security Policy** must let the page load media and objects from the handler's URL: if you set `media-src` or `object-src` (or `default-src`), they need `'self'`, or wherever you mount the handler. `object-src 'none'`, a common recommendation, stops PDFs from showing, as do `frame-ancestors 'none'` and `X-Frame-Options: DENY` on the handler's responses (`SAMEORIGIN` is fine). The handler's own `sandbox` policy on the files it serves doesn't stop `<audio>` and `<video>` from playing them: a response's policy only applies when it's opened as a page.
 
 ### Saving files
 
@@ -429,10 +441,6 @@ The stylesheet styles Markdown with the same `--seclai-*` variables, in light an
 | `section.footnotes` | The footnotes, at the end |
 
 Two more variables: `--seclai-code-font` (the monospace font for code) and `--seclai-code-surface` (the background of code blocks and inline code).
-
-## Placeholders
-
-`MediaPreview` is exported so the API is in place, but it's minimal until it's ported from the main Seclai app: it shows image cards (see [Media](#media)) and a download link for everything else. Audio, video and PDF previews are still to come.
 
 ## License
 

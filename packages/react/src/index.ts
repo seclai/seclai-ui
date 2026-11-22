@@ -43,12 +43,8 @@ export type {
   UploadResult,
 } from "./types";
 
-// Media. MediaPreview previews images; audio, video and PDF are still to come.
-export {
-  MediaPreview,
-  type MediaAspectRatio,
-  type MediaPreviewProps,
-} from "./placeholders/MediaPreview";
+// Media.
+export { MediaPreview, type MediaAspectRatio, type MediaPreviewProps } from "./media/MediaPreview";
 export { MediaGallery, type MediaGalleryProps } from "./media/MediaGallery";
 export { MediaSkeleton, type MediaSkeletonProps } from "./media/MediaSkeleton";
 export { MediaViewer, type MediaViewerProps } from "./media/MediaViewer";
