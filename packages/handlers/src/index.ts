@@ -6,6 +6,7 @@ export {
   MIN_API_VERSION,
 } from "./handlers";
 export type {
+  AttachmentReferences,
   AuthorizeDownload,
   AuthorizeRun,
   AuthorizeUpload,
@@ -14,6 +15,7 @@ export type {
   SeclaiHandler,
   SeclaiHandlers,
   SeclaiHandlersOptions,
+  SeclaiLookups,
   SeclaiUploadOptions,
   UnboundSeclaiHandlers,
   UploadParams,

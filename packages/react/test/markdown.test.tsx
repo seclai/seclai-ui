@@ -1,0 +1,418 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { AgentRunForm, MarkdownContent } from "../src";
+import { jsonResponse, sse, sseResponse } from "./helpers";
+
+function md(content: string) {
+  const { container, rerender } = render(<MarkdownContent content={content} />);
+  const root = container.firstElementChild as HTMLElement;
+  return {
+    root,
+    rerender: (next: string) => rerender(<MarkdownContent content={next} />),
+    // Tag names of the blocks, such as ["p", "ol"].
+    blocks: () => [...root.children].map((el) => el.tagName.toLowerCase()),
+  };
+}
+
+const items = (list: Element) =>
+  [...list.querySelectorAll(":scope > li")].map((li) => ({
+    value: (li as HTMLLIElement).value,
+    number: li.querySelector(".seclai-markdown-number")?.textContent,
+    text: li.lastElementChild?.textContent ?? li.textContent,
+  }));
+
+describe("MarkdownContent", () => {
+  it("keeps the seclai-markdown root", () => {
+    const { root } = md("Hello");
+    expect(root.tagName).toBe("DIV");
+    expect(root.className).toBe("seclai-markdown");
+  });
+
+  it("splits paragraphs on blank lines and breaks lines on single newlines", () => {
+    const { root, blocks } = md("First line\nsecond line\n\n\nNext paragraph");
+    expect(blocks()).toEqual(["p", "p"]);
+    const [first, second] = root.querySelectorAll("p");
+    expect(first!.querySelectorAll("br")).toHaveLength(1);
+    expect(first!.textContent).toBe("First linesecond line");
+    expect(second!.textContent).toBe("Next paragraph");
+  });
+
+  it("handles Windows line endings", () => {
+    const { blocks, root } = md("One\r\n\r\n1. Item");
+    expect(blocks()).toEqual(["p", "ol"]);
+    expect(root.textContent).not.toContain("\r");
+  });
+
+  it("renders numbered lists with dots or parentheses, with a number badge", () => {
+    const { root } = md("1. Sunset\n2) Beach");
+    const ol = root.querySelector("ol")!;
+    expect(ol.start).toBe(1);
+    expect(items(ol)).toEqual([
+      { value: 1, number: "1", text: "Sunset" },
+      { value: 2, number: "2", text: "Beach" },
+    ]);
+  });
+
+  it("keeps the agent's own numbers", () => {
+    const { root } = md("3. Third\n4. Fourth\n7. Seventh");
+    const ol = root.querySelector("ol")!;
+    expect(ol.start).toBe(3);
+    expect(items(ol).map((item) => [item.value, item.number])).toEqual([
+      [3, "3"],
+      [4, "4"],
+      [7, "7"],
+    ]);
+  });
+
+  it("keeps items separated by blank lines in one list, and a paragraph splits it", () => {
+    const { root, blocks } = md("1. One\n\n2. Two\n\nAside\n\n3. Three");
+    expect(blocks()).toEqual(["ol", "p", "ol"]);
+    const [first, second] = root.querySelectorAll("ol");
+    expect(items(first!).map((item) => item.value)).toEqual([1, 2]);
+    expect(second!.start).toBe(3);
+  });
+
+  it("continues an item with the lines straight after it", () => {
+    const { root, blocks } = md("1. Sunset\n   Warm colours\n2. Beach");
+    expect(blocks()).toEqual(["ol"]);
+    const [first] = root.querySelectorAll("li");
+    expect(first!.querySelector("br")).not.toBeNull();
+    expect(items(root.querySelector("ol")!)[0]!.text).toBe("SunsetWarm colours");
+  });
+
+  it("renders bulleted lists with -, * or •", () => {
+    const { root, blocks } = md("- One\n* Two\n• Three");
+    expect(blocks()).toEqual(["ul"]);
+    expect([...root.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["One", "Two", "Three"]);
+  });
+
+  it("doesn't take **bold** at the start of a line for a bullet", () => {
+    const { root, blocks } = md("**Note** this is a paragraph");
+    expect(blocks()).toEqual(["p"]);
+    expect(root.querySelector("strong")!.textContent).toBe("Note");
+    expect(root.textContent).toBe("Note this is a paragraph");
+  });
+
+  it("renders **bold**, also inside list items", () => {
+    const { root } = md("A **big** and **bold** idea\n- **Title**: text\n1. Uses **bold**");
+    expect([...root.querySelectorAll("strong")].map((el) => el.textContent)).toEqual([
+      "big",
+      "bold",
+      "Title",
+      "bold",
+    ]);
+    expect(root.querySelector("p")!.textContent).toBe("A big and bold idea");
+  });
+
+  it("renders bold around a code span", () => {
+    const { root } = md("Saved as **`thumb.png`**");
+    expect(root.querySelector("strong")!.textContent).toBe("`thumb.png`");
+  });
+
+  it("leaves ** that isn't Markdown bold as text", () => {
+    const { root } = md("f(**args, **kwargs) and `**x**` and **** and ** spaced **");
+    expect(root.querySelector("strong")).toBeNull();
+    expect(root.textContent).toBe("f(**args, **kwargs) and `**x**` and **** and ** spaced **");
+  });
+
+  it("renders mixed content in order", () => {
+    const content = [
+      "Here are your thumbnails:",
+      "",
+      "1. **Bold** title on red",
+      "2. Close-up with arrows",
+      "",
+      "Notes:",
+      "- Both are 16:9",
+      "- Text is large",
+      "",
+      "Want changes?",
+    ].join("\n");
+    const { root, blocks } = md(content);
+    expect(blocks()).toEqual(["p", "ol", "p", "ul", "p"]);
+    expect(items(root.querySelector("ol")!).map((item) => item.text)).toEqual([
+      "Bold title on red",
+      "Close-up with arrows",
+    ]);
+    expect(root.querySelectorAll("ul > li")).toHaveLength(2);
+    expect(root.lastElementChild!.textContent).toBe("Want changes?");
+  });
+
+  it("starts a list right after a paragraph line", () => {
+    const { blocks } = md("Options:\n- One\n- Two");
+    expect(blocks()).toEqual(["p", "ul"]);
+  });
+
+  it("shows other Markdown as the text it is", () => {
+    const content = "# Title\n[link](https://example.com)\n| a | b |\n> quote";
+    const { root } = md(content);
+    expect(root.querySelector("h1, a, table, blockquote")).toBeNull();
+    expect(root.querySelector("p")!.textContent).toBe(content.replaceAll("\n", ""));
+    expect(root.querySelectorAll("p br")).toHaveLength(3);
+  });
+
+  it("keeps fenced code verbatim, blank lines and all", () => {
+    const content = "```py\n- not a bullet\n\nf(**a**)\n```\nAfter";
+    const { root, blocks } = md(content);
+    expect(blocks()).toEqual(["p", "p"]);
+    expect(root.querySelector("ul, strong")).toBeNull();
+    expect(root.firstElementChild!.textContent).toBe("```py- not a bulletf(**a**)```");
+    expect(root.lastElementChild!.textContent).toBe("After");
+  });
+
+  it("closes a fence only on a fence line at least as long, with the same character", () => {
+    const content = "````md\n```\n- not a bullet\n~~~~\n```` \n- bullet";
+    const { root, blocks } = md(content);
+    expect(blocks()).toEqual(["p", "ul"]);
+    expect(root.firstElementChild!.textContent).toBe("````md```- not a bullet~~~~```` ");
+    expect(root.querySelector("li")!.textContent).toBe("bullet");
+  });
+
+  it("takes a one-line ```code``` for text, not a fence that never closes", () => {
+    const { root, blocks } = md("Run ```ls``` first\n```ls```\n\n**Done**");
+    expect(blocks()).toEqual(["p", "p"]);
+    expect(root.querySelector("strong")!.textContent).toBe("Done");
+  });
+
+  it("renders HTML in the input as text", () => {
+    const content = '<script>alert(1)</script>\n- <img src=x onerror="alert(1)">\n\n**<b>hi</b>**';
+    const { root } = md(content);
+    expect(root.querySelector("script, img, b")).toBeNull();
+    expect(root.textContent).toContain("<script>alert(1)</script>");
+    expect(root.querySelector("li")!.textContent).toBe('<img src=x onerror="alert(1)">');
+    expect(root.querySelector("strong")!.textContent).toBe("<b>hi</b>");
+  });
+
+  it("renders ---, ***, ___ and spaced forms as a rule", () => {
+    for (const rule of ["---", "***", "___", "* * *", "- - -", "_ _ _", "  ----  ", "*\t*\t*"]) {
+      const { root, blocks } = md(rule);
+      expect(blocks()).toEqual(["hr"]);
+      expect(root.querySelector("ul, li")).toBeNull();
+    }
+  });
+
+  it("ends a paragraph or a list at a rule", () => {
+    const { root, blocks } = md("Intro\n---\n- One\n* * *\n1. Two\n___\nOutro");
+    expect(blocks()).toEqual(["p", "hr", "ul", "hr", "ol", "hr", "p"]);
+    expect(root.querySelector("ul")!.textContent).toBe("One");
+    expect(items(root.querySelector("ol")!)[0]!.text).toBe("Two");
+  });
+
+  it("leaves --, ** and -- note as text", () => {
+    const { root, blocks } = md("--\n\n**\n\n-- note");
+    expect(blocks()).toEqual(["p", "p", "p"]);
+    expect(root.querySelector("hr, ul, strong")).toBeNull();
+    expect(root.textContent).toBe("--**-- note");
+  });
+
+  it("keeps a rule inside a code fence literal", () => {
+    const { root, blocks } = md("```\n---\n* * *\n```");
+    expect(blocks()).toEqual(["p"]);
+    expect(root.querySelector("hr, ul")).toBeNull();
+    expect(root.textContent).toBe("```---* * *```");
+  });
+
+  it("nests an indented item under the item before it", () => {
+    const { root, blocks } = md("- Fruit\n  - Apple\n  - Pear\n- Veg");
+    expect(blocks()).toEqual(["ul"]);
+    const top = root.querySelector("ul")!;
+    expect(top.querySelectorAll(":scope > li")).toHaveLength(2);
+    const nested = top.querySelector(":scope > li > ul")!;
+    expect([...nested.children].map((li) => li.textContent)).toEqual(["Apple", "Pear"]);
+    expect(top.lastElementChild!.textContent).toBe("Veg");
+  });
+
+  it("needs at least 2 more spaces, or a tab, to nest", () => {
+    const { root } = md("- One\n - Two\n\t- Three");
+    const top = root.querySelector("ul")!;
+    expect(top.querySelectorAll(":scope > li")).toHaveLength(2);
+    expect(top.querySelector("li li")!.textContent).toBe("Three");
+  });
+
+  it("nests three levels of mixed lists and dedents back out", () => {
+    const content = [
+      "1. Thumbnails",
+      "   - Red",
+      "     1. Bold title",
+      "     2. Small title",
+      "        More detail",
+      "   - Blue",
+      "2. Video",
+      "   3. Intro",
+      "- Notes",
+    ].join("\n");
+    const { root, blocks } = md(content);
+    expect(blocks()).toEqual(["ol", "ul"]);
+
+    const top = root.querySelector("ol")!;
+    expect(items(top).map((item) => [item.value, item.number])).toEqual([
+      [1, "1"],
+      [2, "2"],
+    ]);
+    const [first, second] = top.querySelectorAll(":scope > li");
+    const colours = first!.querySelector("ul")!;
+    expect(colours.querySelectorAll(":scope > li")).toHaveLength(2);
+
+    const titles = colours.querySelector("ol")!;
+    expect(titles.getAttribute("role")).toBe("list");
+    expect(titles.start).toBe(1);
+    expect(items(titles)).toEqual([
+      { value: 1, number: "1", text: "Bold title" },
+      { value: 2, number: "2", text: "Small titleMore detail" },
+    ]);
+    expect(colours.lastElementChild!.textContent).toBe("Blue");
+
+    const intro = second!.querySelector("ol")!;
+    expect(intro.start).toBe(3);
+    expect(items(intro)).toEqual([{ value: 3, number: "3", text: "Intro" }]);
+    expect(root.lastElementChild!.textContent).toBe("Notes");
+  });
+
+  it("starts a new list at a level when the marker kind changes", () => {
+    const { root } = md("- Parent\n  - Bullet\n  1. Number");
+    const parent = root.querySelector("ul > li")!;
+    expect([...parent.children].map((el) => el.tagName.toLowerCase())).toEqual(["ul", "ol"]);
+  });
+
+  it("keeps nested items in their list across blank lines", () => {
+    const { root, blocks } = md("1. One\n\n   - Sub\n\n   - Sub two\n\n2. Two\n\nAfter");
+    expect(blocks()).toEqual(["ol", "p"]);
+    expect(root.querySelectorAll("ol > li > div > ul > li")).toHaveLength(2);
+    expect(items(root.querySelector("ol")!).map((item) => item.value)).toEqual([1, 2]);
+  });
+
+  describe("while streaming", () => {
+    it("shows a marker with nothing after it as text", () => {
+      for (const partial of ["1.", "1. ", "2)", "- ", "*", "•"]) {
+        const { root, blocks } = md(partial);
+        expect(blocks()).toEqual(["p"]);
+        expect(root.textContent).toBe(partial);
+      }
+    });
+
+    it("shows the next item's bare number on its own line, then makes it an item", () => {
+      const { root, blocks, rerender } = md("1. Sunset\n2.");
+      expect(blocks()).toEqual(["ol", "p"]);
+      expect(items(root.querySelector("ol")!)).toHaveLength(1);
+      expect(root.querySelector("p")!.textContent).toBe("2.");
+
+      rerender("1. Sunset\n2. Beach");
+      expect(blocks()).toEqual(["ol"]);
+      expect(items(root.querySelector("ol")!).map((item) => item.value)).toEqual([1, 2]);
+    });
+
+    it("shows the next item's bare number, before its dot, on its own line", () => {
+      for (const partial of ["2", "  2 ", "12", "2. "]) {
+        const { root, blocks } = md(`1. Sunset\n${partial}`);
+        expect(blocks()).toEqual(["ol", "p"]);
+        expect(items(root.querySelector("ol")!)[0]!.text).toBe("Sunset");
+        expect(root.querySelector("p")!.textContent).toBe(partial);
+      }
+    });
+
+    it("shows a rule's first characters as text, not a bullet", () => {
+      for (const partial of ["-", "*", "_", "- -", "* *", "_ _", "--", "**", "- *"]) {
+        const { root, blocks } = md(partial);
+        expect(blocks()).toEqual(["p"]);
+        expect(root.textContent).toBe(partial);
+      }
+    });
+
+    it("shows a rule's first characters after an item on their own line, then the rule", () => {
+      const { root, blocks, rerender } = md("- One\n- -");
+      expect(blocks()).toEqual(["ul", "p"]);
+      expect(root.querySelector("li")!.textContent).toBe("One");
+
+      rerender("- One\n- - -");
+      expect(blocks()).toEqual(["ul", "hr"]);
+    });
+
+    it("shows a nested item's marker as text until its text arrives", () => {
+      const { root, blocks, rerender } = md("1. One\n   -");
+      expect(blocks()).toEqual(["ol", "p"]);
+      expect(items(root.querySelector("ol")!)[0]!.text).toBe("One");
+
+      rerender("1. One\n   - Sub");
+      expect(blocks()).toEqual(["ol"]);
+      expect(root.querySelector("ol li ul li")!.textContent).toBe("Sub");
+    });
+
+    it("shows an unclosed ** as text, then bold once it closes", () => {
+      const { root, rerender } = md("A **bol");
+      expect(root.querySelector("strong")).toBeNull();
+      expect(root.textContent).toBe("A **bol");
+
+      rerender("A **bold**");
+      expect(root.querySelector("strong")!.textContent).toBe("bold");
+    });
+
+    it("shows a list item's unclosed ** as text", () => {
+      const { root } = md("1. **Sunset");
+      expect(root.querySelector("strong")).toBeNull();
+      expect(items(root.querySelector("ol")!)[0]!.text).toBe("**Sunset");
+    });
+
+    it("shows an unclosed code fence as text to the end", () => {
+      const { root, blocks } = md("```\n- one\n\n**x**");
+      expect(blocks()).toEqual(["p"]);
+      expect(root.querySelector("ul, strong")).toBeNull();
+    });
+  });
+});
+
+// Safari before 16.4 can't parse a regex lookbehind, and one anywhere in the
+// bundle stops the whole package from loading there.
+describe("performance", () => {
+  // A marker then a long run of spaces used to backtrack quadratically in the
+  // bare-marker check: about 5 seconds per render at this length.
+  it.each(["-", "*", "_", "•"])("renders %s followed by a long run of spaces quickly", (marker) => {
+    const content = `${marker}${" ".repeat(100_000)}x`;
+    const start = performance.now();
+    const { root } = md(content);
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(root.textContent).toContain("x");
+  });
+});
+
+describe("browser support", () => {
+  it("uses no regex lookbehind in the source", () => {
+    const src = join(import.meta.dirname, "../src");
+    const files = readdirSync(src, { recursive: true, encoding: "utf8" }).filter((file) => /\.tsx?$/.test(file));
+    expect(files).toContain(join("placeholders", "MarkdownContent.tsx"));
+    for (const file of files) {
+      expect({ file, lookbehind: /\(\?<[=!]/.test(readFileSync(join(src, file), "utf8")) }).toEqual({
+        file,
+        lookbehind: false,
+      });
+    }
+  });
+});
+
+describe("MarkdownContent in AgentRunForm", () => {
+  it("renders the agent's numbered list", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/attachment-references")) return jsonResponse({ requires_uploads: false });
+        return sseResponse(
+          sse("done", { run_id: "r1", status: "completed", output: "Done:\n\n1. **Red** title\n2. Blue title" }),
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AgentRunForm />);
+
+    await user.type(await screen.findByLabelText("Input"), "hi");
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    const list = await screen.findByRole("list");
+    expect(items(list).map((item) => [item.number, item.text])).toEqual([
+      ["1", "Red title"],
+      ["2", "Blue title"],
+    ]);
+    expect(screen.getByText("Red").tagName).toBe("STRONG");
+  });
+});
